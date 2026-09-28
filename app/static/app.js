@@ -155,7 +155,7 @@ function renderFilters() {
   if (state.sourceId) srcSel.value = String(state.sourceId);
 
   const mode = state.tab === "pivot" ? state.mode : "week";
-  $("#export").href = `/api/export.xlsx${qs({ mode, date: state.date, category: state.category, q: state.q })}`;
+  $("#export").href = `api/export.xlsx${qs({ mode, date: state.date, category: state.category, q: state.q })}`;
   $("#export").hidden = state.tab === "trend";
   renderPeriodSelect();
 }
@@ -366,11 +366,11 @@ async function load() {
   if (!state.sourceId && state.meta.sources.length) state.sourceId = state.meta.sources[0].id;
   try {
     if (state.tab === "pivot") {
-      state.data.pivot = await api(`/api/pivot${qs({ mode: state.mode, date: state.date })}`);
+      state.data.pivot = await api(`api/pivot${qs({ mode: state.mode, date: state.date })}`);
     } else if (state.tab === "days") {
-      state.data.days = await api(`/api/by-days${qs({ source_id: state.sourceId, date: state.date })}`);
+      state.data.days = await api(`api/by-days${qs({ source_id: state.sourceId, date: state.date })}`);
     } else {
-      state.data.trend = await api(`/api/trend${qs({ source_id: state.sourceId, end: state.date, count: state.trendCount })}`);
+      state.data.trend = await api(`api/trend${qs({ source_id: state.sourceId, end: state.date, count: state.trendCount })}`);
     }
     renderCurrent();
     if (state.detail) loadDetail();
@@ -380,7 +380,7 @@ async function load() {
 }
 
 async function loadMeta() {
-  state.meta = await api("/api/meta");
+  state.meta = await api("api/meta");
   if (!state.date || !state.meta.days.some((d) => d.date === state.date)) state.date = defaultDate();
   if (state.sourceId && !state.meta.sources.some((s) => s.id === state.sourceId)) state.sourceId = null;
 }
@@ -394,7 +394,7 @@ function openDetail(code) {
 }
 
 async function loadDetail(scroll = false) {
-  const data = await api(`/api/item/${encodeURIComponent(state.detail)}${qs({ date: state.date })}`);
+  const data = await api(`api/item/${encodeURIComponent(state.detail)}${qs({ date: state.date })}`);
   const panel = $("#detail");
   panel.hidden = false;
   $("#detail-cat").textContent = `${data.item.category} · код ${data.item.code}${data.item.pack ? ` · упак ${data.item.pack} ${data.item.unit}` : ""}`;
@@ -513,7 +513,7 @@ async function addFiles(files) {
   if (!list.length) return;
   $("#sources-list").replaceChildren(...state.meta.sources.map((s) => el("option", { value: s.name })));
   for (const file of list) {
-    const { source } = await api(`/api/source-name${qs({ filename: file.name })}`);
+    const { source } = await api(`api/source-name${qs({ filename: file.name })}`);
     pending.push({ file, source });
   }
   renderPending();
@@ -543,7 +543,7 @@ async function submitUpload(e) {
   for (const p of pending) { form.append("files", p.file); form.append("sources", p.source); }
   const out = $("#upload-results");
   try {
-    const { results } = await api("/api/upload", { method: "POST", body: form });
+    const { results } = await api("api/upload", { method: "POST", body: form });
     out.replaceChildren(...results.map((r) => (r.ok
       ? el("div", { class: "result" },
           el("b", {}, r.file), ` → «${r.source}»: ${r.rows} строк, ${r.items} товаров, ${r.date_from} — ${r.date_to}`,
@@ -564,7 +564,7 @@ async function submitUpload(e) {
 }
 
 async function loadUploads() {
-  const rows = await api("/api/uploads");
+  const rows = await api("api/uploads");
   const head = el("tr", {}, ...["Файл", "Источник", "Период", "Строк", "Загружен", ""].map((h) => el("th", {}, h)));
   const body = el("tbody", {}, ...rows.map((u) => el("tr", {},
     el("td", {}, u.filename),
@@ -575,7 +575,7 @@ async function loadUploads() {
     el("td", {}, el("button", {
       class: "btn small", onclick: async () => {
         if (!confirm(`Удалить загрузку «${u.filename}» и её данные?`)) return;
-        await api(`/api/uploads/${u.id}`, { method: "DELETE" });
+        await api(`api/uploads/${u.id}`, { method: "DELETE" });
         await loadMeta();
         loadUploads();
       },
@@ -589,7 +589,7 @@ async function loadUploads() {
 
 async function patchSource(id, body) {
   try {
-    await api(`/api/sources/${id}`, {
+    await api(`api/sources/${id}`, {
       method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
     });
   } catch (err) {
@@ -617,7 +617,7 @@ function renderSources() {
     el("td", {}, el("button", {
       class: "btn small", onclick: async () => {
         if (!confirm(`Удалить источник «${s.name}» со всеми загрузками?`)) return;
-        await api(`/api/sources/${s.id}`, { method: "DELETE" });
+        await api(`api/sources/${s.id}`, { method: "DELETE" });
         await loadMeta();
         renderSources();
       },
@@ -630,9 +630,9 @@ function renderSources() {
     const [x, y] = [list[a], list[b]];
     // Позиции могут совпадать — раздаём по индексам, чтобы обмен точно сработал.
     await Promise.all([
-      api(`/api/sources/${x.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ position: b }) }),
-      api(`/api/sources/${y.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ position: a }) }),
-      ...list.filter((_, i) => i !== a && i !== b).map((s) => api(`/api/sources/${s.id}`, {
+      api(`api/sources/${x.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ position: b }) }),
+      api(`api/sources/${y.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ position: a }) }),
+      ...list.filter((_, i) => i !== a && i !== b).map((s) => api(`api/sources/${s.id}`, {
         method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ position: list.indexOf(s) }),
       })),
     ]);

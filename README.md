@@ -49,10 +49,12 @@ app/
   db.py        пул соединений и схема PostgreSQL
   static/      интерфейс (HTML/CSS/JS без сборки и без CDN)
 deploy/
-  create-vm.sh         создание ВМ в Yandex Cloud через yc CLI
+  setup-vm.sh          установка на уже работающую ВМ без Docker (systemd + nginx)
+  nginx-instrument.conf  location/server для существующего nginx
+  create-vm.sh         создание новой ВМ в Yandex Cloud через yc CLI
   cloud-init.yaml.tpl  первичная настройка ВМ (Docker)
   deploy.sh            выкладка кода и запуск docker compose
-  backup.sh            ежедневный pg_dump
+  backup.sh            ежедневный pg_dump (оба варианта установки)
 docker-compose.yml     app + postgres
 tests/                 тесты парсера и API
 ```
@@ -75,16 +77,62 @@ TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/instrument_test pytest -
 
 Без `TEST_DATABASE_URL` выполняются только тесты парсера.
 
-## Деплой на Yandex Cloud (ВМ + PostgreSQL на ней же)
+## Установка на существующую ВМ (без Docker)
 
-### 0. Что нужно локально
+Для ВМ, где уже крутятся другие сайты за nginx и нативный PostgreSQL. Приложение
+ставится так же, как они: systemd-сервис uvicorn на `127.0.0.1:8030` (наружу порт
+не открывается), своя БД в уже работающем PostgreSQL, публикация — через nginx с HTTPS.
+Docker не нужен и не ставится (он переписывает iptables и может задеть соседей).
+
+Всё выполняется **на ВМ** по SSH — локально (в т.ч. на Windows) ничего ставить не надо.
+
+```bash
+# 1. код (пока PR не влит — ветка; после — main)
+git clone -b claude/gracious-sagan-pu3a2e https://github.com/ERMIN372/instrument.git ~/instrument
+cd ~/instrument
+
+# 2. БД + venv + systemd-сервис; в конце печатает логин/пароль сайта
+bash deploy/setup-vm.sh
+```
+
+Параметры (все необязательны): `APP_PORT=8030` — локальный порт, `PG_PORT=5432` — какой из
+кластеров PostgreSQL (`pg_lsclusters` покажет список), `DB_NAME`/`DB_USER=instrument`.
+Скрипт остановится, если порт занят чужим процессом или роль/БД с таким именем уже есть.
+
+3. **nginx** — выбери вариант в `deploy/nginx-instrument.conf`:
+   * **A: путь** на уже существующем HTTPS-сайте (`https://твой-домен/instrument/`) —
+     вставить два `location` в его `server { listen 443 ssl; ... }`;
+   * **B: поддомен** (`instrument.твой-домен`) — отдельный `server` + `sudo certbot --nginx -d ...`.
+
+   ```bash
+   sudo nginx -t && sudo systemctl reload nginx
+   ```
+
+**Обновление:** `cd ~/instrument && git pull && bash deploy/setup-vm.sh` — пароли и данные сохраняются.
+
+**Диагностика:**
+
+```bash
+systemctl status instrument                     # жив ли сервис
+journalctl -u instrument -n 100 --no-pager      # логи приложения
+curl -s http://127.0.0.1:8030/healthz           # {"ok":true} — приложение и БД в порядке
+sudo tail -n 50 /var/log/nginx/error.log        # 502 от nginx = сервис лежит или порт не тот
+```
+
+**Бэкап** — тот же `deploy/backup.sh` (берёт `DATABASE_URL` из `.env`), см. раздел «Бэкапы БД» ниже.
+
+## Альтернатива: новая ВМ с Docker
+
+### Деплой на Yandex Cloud (ВМ + PostgreSQL на ней же)
+
+#### 0. Что нужно локально
 
 * `yc` — [CLI Yandex Cloud](https://yandex.cloud/ru/docs/cli/quickstart):
   `curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash`, затем `yc init`
   (выбрать облако и каталог).
 * `jq`, `rsync`, `openssl`, ssh-ключ (`ssh-keygen -t ed25519`, если нет).
 
-### 1. Создать ВМ
+#### 1. Создать ВМ
 
 ```bash
 bash deploy/create-vm.sh
@@ -101,7 +149,7 @@ SSH_ALLOW_CIDR=203.0.113.10/32 bash deploy/create-vm.sh
 
 В конце скрипт печатает IP.
 
-### 2. Выложить приложение
+#### 2. Выложить приложение
 
 ```bash
 VM_HOST=<IP> bash deploy/deploy.sh
@@ -112,7 +160,7 @@ VM_HOST=<IP> bash deploy/deploy.sh
 пароль БД зашит в уже созданный том PostgreSQL. Повторный `deploy.sh` — это
 обновление кода, данные в БД сохраняются.
 
-### 3. Проверка и диагностика
+#### 3. Проверка и диагностика
 
 ```bash
 curl -u admin:<APP_PASSWORD> http://<IP>/api/meta         # API отвечает
@@ -132,7 +180,7 @@ ssh deploy@<IP> 'sudo cat /var/log/cloud-init-output.log'  # если Docker н�
 | `password authentication failed` в логах app | `.env` пересоздан после первого запуска. Верни старый пароль или (данные потеряются!) `docker compose down -v` |
 | 401 в браузере | логин/пароль из `.env` (`APP_USER` / `APP_PASSWORD`) |
 
-### 4. Бэкапы БД
+## Бэкапы БД
 
 На ВМ:
 
@@ -140,7 +188,18 @@ ssh deploy@<IP> 'sudo cat /var/log/cloud-init-output.log'  # если Docker н�
 (crontab -l 2>/dev/null; echo "0 3 * * * bash $HOME/instrument/deploy/backup.sh >> $HOME/backups/backup.log 2>&1") | crontab -
 ```
 
-Дампы лежат в `~/backups`, хранятся 14 дней. Восстановление (в пустую БД, приложение на паузе):
+Дампы лежат в `~/backups`, хранятся 14 дней.
+
+Восстановление без Docker (в пустую БД, сервис на паузе):
+
+```bash
+sudo systemctl stop instrument
+sudo -u postgres dropdb -p 5432 instrument && sudo -u postgres createdb -p 5432 -O instrument instrument
+gunzip -c ~/backups/instrument-XXXX.sql.gz | psql "$(grep ^DATABASE_URL ~/instrument/.env | cut -d= -f2-)"
+sudo systemctl start instrument
+```
+
+Восстановление в Docker-варианте (в пустую БД, приложение на паузе):
 
 ```bash
 cd ~/instrument
@@ -156,9 +215,9 @@ docker compose start app
 
 ## Безопасность — важно
 
-* Сайт защищён HTTP Basic Auth, но **по HTTP пароль идёт открытым текстом**.
-  Для боевого режима: домен + HTTPS (например, Caddy перед приложением
-  с автоматическим сертификатом Let's Encrypt) и закрытый порт 80.
+* Сайт защищён HTTP Basic Auth. Публикуй его **только через HTTPS** (nginx с сертификатом):
+  по голому HTTP пароль идёт открытым текстом. В варианте без Docker приложение
+  слушает только `127.0.0.1`, снаружи до него не достучаться в обход nginx.
 * SSH по умолчанию открыт всему интернету; ограничь `SSH_ALLOW_CIDR=<твой IP>/32`
   при создании ВМ.
 * PostgreSQL наружу не публикуется — доступен только контейнеру приложения.
