@@ -4,39 +4,47 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 SCHEMA = """
+-- Источник = один тип выгрузки (колонка в сводной таблице).
+CREATE TABLE IF NOT EXISTS sources (
+    id       serial PRIMARY KEY,
+    name     text NOT NULL UNIQUE,
+    -- sum: сумма за период; last: значение на последний день периода (остатки)
+    agg      text NOT NULL DEFAULT 'sum' CHECK (agg IN ('sum', 'last')),
+    position integer NOT NULL DEFAULT 0,
+    hidden   boolean NOT NULL DEFAULT false
+);
+
+CREATE TABLE IF NOT EXISTS items (
+    code      text PRIMARY KEY,
+    uid       text,
+    name      text NOT NULL,
+    base_unit text NOT NULL DEFAULT 'шт',
+    pack_size integer,
+    category  text NOT NULL DEFAULT 'Прочее'
+);
+
 CREATE TABLE IF NOT EXISTS uploads (
     id          bigserial PRIMARY KEY,
+    source_id   integer NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
     filename    text NOT NULL,
-    source      text NOT NULL,
-    sheets      text[] NOT NULL DEFAULT '{}',
-    date_from   date,
-    date_to     date,
-    facts       integer NOT NULL DEFAULT 0,
+    date_from   date NOT NULL,
+    date_to     date NOT NULL,
+    rows        integer NOT NULL,
     uploaded_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS metrics (
-    id       bigserial PRIMARY KEY,
-    source   text NOT NULL,
-    name     text NOT NULL,
-    label    text,
-    agg      text NOT NULL DEFAULT 'sum' CHECK (agg IN ('sum', 'avg', 'last')),
-    hidden   boolean NOT NULL DEFAULT false,
-    position integer NOT NULL DEFAULT 0,
-    UNIQUE (source, name)
+CREATE TABLE IF NOT EXISTS movements (
+    source_id integer NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    upload_id bigint  NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+    day       date    NOT NULL,
+    item_code text    NOT NULL REFERENCES items(code),
+    qty       double precision NOT NULL,  -- в единицах файла (шт / упак / кг)
+    qty_base  double precision NOT NULL,  -- в базовых единицах (шт / кг)
+    PRIMARY KEY (source_id, day, item_code)
 );
 
-CREATE TABLE IF NOT EXISTS facts (
-    metric_id bigint NOT NULL REFERENCES metrics(id) ON DELETE CASCADE,
-    upload_id bigint NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
-    day       date   NOT NULL,
-    dims      jsonb  NOT NULL DEFAULT '{}',
-    value     double precision NOT NULL,
-    n         integer NOT NULL DEFAULT 1
-);
-
-CREATE INDEX IF NOT EXISTS facts_day_metric_idx ON facts (day, metric_id);
-CREATE INDEX IF NOT EXISTS facts_upload_idx ON facts (upload_id);
+CREATE INDEX IF NOT EXISTS movements_day_idx ON movements (day);
+CREATE INDEX IF NOT EXISTS movements_upload_idx ON movements (upload_id);
 """
 
 pool = ConnectionPool(

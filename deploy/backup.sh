@@ -10,6 +10,7 @@ mkdir -p "$BACKUP_DIR"
 
 set -a; source .env; set +a
 OUT="$BACKUP_DIR/instrument-$(date +%F-%H%M).sql.gz"
-docker compose exec -T db pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" | gzip > "$OUT"
+# Те же умолчания, что в docker-compose.yml.
+docker compose exec -T db pg_dump -U "${POSTGRES_USER:-instrument}" "${POSTGRES_DB:-instrument}" | gzip > "$OUT"
 find "$BACKUP_DIR" -name 'instrument-*.sql.gz' -mtime +"$KEEP_DAYS" -delete
 echo "$(date -Is) backup ok: $OUT"

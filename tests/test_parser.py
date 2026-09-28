@@ -1,105 +1,80 @@
 import datetime as dt
 import io
-import json
 
+import pytest
 from openpyxl import Workbook
 
-from app.parser import ROW_COUNT, parse_xlsx, source_from_filename
-from app.service import delta, period_value
+from app.parser import parse_xlsx, source_from_filename, to_date, to_number
 
 D = dt.date
+HEADER = ["Дата", "UID номенклатуры", "Код номенклатуры", "Наименование номенклатуры",
+          "Единица измерения", "Количество", "Количество базовых"]
 
 
-def _xlsx(fill) -> bytes:
+def _xlsx(rows, header=HEADER, preamble=()) -> bytes:
     wb = Workbook()
-    fill(wb)
+    ws = wb.active
+    for line in preamble:
+        ws.append(line)
+    ws.append(header)
+    for r in rows:
+        ws.append(r)
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def test_long_layout_with_dimension_and_total_row():
-    def fill(wb):
-        ws = wb.active
-        ws.append(["Отчёт по продажам"])
-        ws.append([])
-        ws.append(["Дата", "Магазин", "Выручка", "Средний чек"])
-        ws.append([dt.datetime(2026, 9, 21), "Центр", 1000, 500])
-        ws.append([dt.datetime(2026, 9, 21), "Север", 300, 300])
-        ws.append([dt.datetime(2026, 9, 22), "Центр", "1 200,50", 400])
-        ws.append(["Итого", None, 2500.5, None])
+def test_1c_export_packs_kg_duplicates_and_totals():
+    data = _xlsx([
+        ["01.09.2026", "u1", "00000168402", "Булка для гамбургера замороженная 80 г, упак 24 шт", "упак, 24 шт", 10, 240],
+        ["01.09.2026", "u1", "00000168402", "Булка для гамбургера замороженная 80 г, упак 24 шт", "упак, 24 шт", 1, 24],
+        [dt.datetime(2026, 9, 2), "u2", "00000210097", "Хлеб для мясного производства, вес", "кг", 286.5, 286.5],
+        ["02.09.2026", "u3", "00000099305", "Ватрушка венгерская 110 г, упак 20 шт", "шт", -20, -20],
+        ["Итого", None, None, None, None, 277.5, 530.5],
+    ], preamble=[["Выгрузка из 1С"], []])
 
-    p = parse_xlsx(_xlsx(fill))
-    assert p.metrics == {"Выручка": "sum", "Средний чек": "avg"}
-    center = json.dumps({"Магазин": "Центр"}, ensure_ascii=False)
-    assert p.facts[("Выручка", D(2026, 9, 21), center)] == [1000.0, 1]
-    assert p.facts[("Выручка", D(2026, 9, 22), center)] == [1200.5, 1]
-    assert p.days == [D(2026, 9, 21), D(2026, 9, 22)]  # «Итого» не попало
-    assert ROW_COUNT not in p.metrics  # 1.5 строки на день — не транзакции
-
-
-def test_transactional_file_gets_row_count():
-    def fill(wb):
-        ws = wb.active
-        ws.append(["Дата заказа", "Номер заказа", "Сумма"])
-        for i in range(6):
-            ws.append([dt.datetime(2026, 9, 21 + i // 3), 1000 + i, 100])
-
-    p = parse_xlsx(_xlsx(fill))
-    assert "Номер заказа" not in p.metrics
-    assert p.facts[(ROW_COUNT, D(2026, 9, 21), "{}")] == [3.0, 3]
-    assert p.facts[("Сумма", D(2026, 9, 22), "{}")] == [300.0, 3]
+    p = parse_xlsx(data)
+    assert p.movements[(D(2026, 9, 1), "00000168402")] == [11, 264]  # повтор сложен, в штуках
+    assert p.movements[(D(2026, 9, 2), "00000210097")] == [286.5, 286.5]
+    assert p.days == [D(2026, 9, 1), D(2026, 9, 2)]
+    bun = p.items["00000168402"]
+    assert (bun.base_unit, bun.pack_size, bun.category) == ("шт", 24, "Булка")
+    assert p.items["00000210097"].base_unit == "кг"
+    assert p.items["00000099305"].pack_size == 20  # из названия, когда единица «шт»
+    assert (p.rows, p.merged, p.negative, p.skipped) == (4, 1, 1, 1)
+    assert len(p.warnings) == 3
 
 
-def test_wide_layout_with_group_carry_and_percent_format():
-    def fill(wb):
-        ws = wb.active
-        ws.append(["Группа", "Показатель"] + [dt.datetime(2026, 9, 21 + i) for i in range(7)] + ["Итого"])
-        ws.append(["Магазин 1", "Выручка"] + [10] * 7 + [70])
-        ws.append([None, "Конверсия"] + [0.125] * 7 + [None])
-        ws.append(["Остаток на складе", None] + [50 - i for i in range(7)] + [None])
-        for c in range(3, 10):
-            ws.cell(row=3, column=c).number_format = "0.0%"
-
-    p = parse_xlsx(_xlsx(fill))
-    assert p.metrics == {
-        "Магазин 1 / Выручка": "sum",
-        "Магазин 1 / Конверсия": "avg",
-        "Остаток на складе": "last",
-    }
-    assert p.facts[("Магазин 1 / Конверсия", D(2026, 9, 21), "{}")] == [12.5, 1]
-    assert len(p.days) == 7
+def test_minimal_columns_any_order():
+    data = _xlsx([[5, "01.09.2026", "Слойка с малиной"]], header=["Количество", "Дата", "Номенклатура"])
+    p = parse_xlsx(data)
+    assert p.movements == {(D(2026, 9, 1), "Слойка с малиной"): [5, 5]}  # без кода ключ — название
 
 
-def test_multiple_sheets_prefix_metrics():
-    def fill(wb):
-        a = wb.active
-        a.title = "Москва"
-        a.append(["Дата", "Выручка"])
-        a.append([dt.datetime(2026, 9, 21), 1])
-        b = wb.create_sheet("СПб")
-        b.append(["Дата", "Выручка"])
-        b.append([dt.datetime(2026, 9, 21), 2])
-        wb.create_sheet("Пусто")
-
-    p = parse_xlsx(_xlsx(fill))
-    assert set(p.metrics) == {"Москва: Выручка", "СПб: Выручка"}
-    assert p.sheets == ["Москва", "СПб"]
-    assert any("Пусто" in w for w in p.warnings)
+def test_missing_columns_is_a_clear_error():
+    with pytest.raises(ValueError, match="заголовка"):
+        parse_xlsx(_xlsx([["a", 1]], header=["Что-то", "Сколько"]))
 
 
-def test_source_from_filename():
-    assert source_from_filename("Продажи_сентябрь_2026.xlsx") == "Продажи"
-    assert source_from_filename("Звонки 21.09-27.09.xlsx") == "Звонки"
-    assert source_from_filename("2026.xlsx") == "2026"
+def test_header_without_rows_is_an_error():
+    with pytest.raises(ValueError, match="нет ни одной строки"):
+        parse_xlsx(_xlsx([]))
 
 
-def test_period_aggregations():
-    cells = {D(2026, 9, 21): (10.0, 2), D(2026, 9, 23): (30.0, 1)}
-    days = [D(2026, 9, 21) + dt.timedelta(days=i) for i in range(7)]
-    assert period_value("sum", cells, days) == 40.0
-    assert period_value("avg", cells, days) == 40.0 / 3
-    assert period_value("last", cells, days) == 30.0
-    assert period_value("sum", {}, days) is None
-    assert delta(110, 100) == 0.1
-    assert delta(5, 0) is None
+def test_helpers():
+    assert to_date("27.09.2026") == D(2026, 9, 27)
+    assert to_date("2026-09-27 00:00:00") == D(2026, 9, 27)
+    assert to_date("Итого") is None
+    assert to_number("1 200,5") == 1200.5
+    assert to_number("12 шт") is None
+    assert to_number(True) is None
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("Выпуск_сентябрь_2026.xlsx", "Выпуск"),
+    ("Отгрузки с 01.09 по 30.09.xlsx", "Отгрузки"),
+    ("Остатки W39.xlsx", "Остатки"),
+    ("2026.xlsx", "2026"),
+])
+def test_source_from_filename(name, expected):
+    assert source_from_filename(name) == expected

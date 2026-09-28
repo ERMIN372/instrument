@@ -3,70 +3,67 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Instrument — недельная аналитика</title>
+  <title>Instrument — сводная по неделям</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">Instrument</div>
     <nav class="tabs" role="tablist">
-      <button role="tab" data-tab="week" aria-selected="true">Неделя</button>
+      <button role="tab" data-tab="pivot" aria-selected="true">Сводная</button>
+      <button role="tab" data-tab="days">По дням</button>
       <button role="tab" data-tab="trend">Динамика</button>
       <button role="tab" data-tab="upload">Загрузка</button>
-      <button role="tab" data-tab="metrics">Метрики</button>
+      <button role="tab" data-tab="sources">Источники</button>
     </nav>
   </header>
 
   <main>
-    <!-- Неделя: единая таблица на учётную неделю -->
-    <section id="tab-week" class="tab" role="tabpanel">
-      <div class="toolbar">
-        <div class="weeknav">
-          <button id="week-prev" class="btn icon" title="Предыдущая неделя" aria-label="Предыдущая неделя">‹</button>
-          <select id="week-select" aria-label="Неделя"></select>
-          <button id="week-next" class="btn icon" title="Следующая неделя" aria-label="Следующая неделя">›</button>
-        </div>
-        <div class="dimfilter">
-          <select class="dim-key" aria-label="Разрез"></select>
-          <select class="dim-value" aria-label="Значение разреза" hidden></select>
-        </div>
-        <a id="week-export" class="btn" href="#">Скачать xlsx</a>
+    <!-- Общая панель фильтров для таблиц -->
+    <div id="filters" class="toolbar">
+      <div class="seg" id="mode-toggle" role="group" aria-label="Период">
+        <button data-mode="week" aria-pressed="true">Неделя</button>
+        <button data-mode="day" aria-pressed="false">День</button>
       </div>
-      <div id="week-empty" class="empty" hidden>
-        Данных пока нет. Загрузи xlsx на вкладке «Загрузка».
+      <div class="periodnav">
+        <button id="period-prev" class="btn icon" aria-label="Назад">‹</button>
+        <select id="period-select" aria-label="Период"></select>
+        <button id="period-next" class="btn icon" aria-label="Вперёд">›</button>
       </div>
-      <div class="table-wrap"><table id="week-table" class="grid"></table></div>
-      <p class="hint">Клик по строке — график метрики по неделям и дням.</p>
-    </section>
+      <select id="source-select" aria-label="Источник" hidden></select>
+      <label id="count-wrap" class="inline" hidden>Недель
+        <select id="trend-count">
+          <option>4</option><option selected>8</option><option>12</option><option>26</option>
+        </select>
+      </label>
+      <select id="category-select" aria-label="Категория"></select>
+      <input id="search" type="search" placeholder="Поиск: название или код" aria-label="Поиск">
+      <a id="export" class="btn" href="#">Скачать xlsx</a>
+    </div>
+    <p id="caption" class="hint"></p>
 
-    <!-- Динамика: метрики × последние N недель -->
+    <section id="tab-pivot" class="tab" role="tabpanel">
+      <div class="table-wrap"><table id="pivot-table" class="grid"></table></div>
+    </section>
+    <section id="tab-days" class="tab" role="tabpanel" hidden>
+      <div class="table-wrap"><table id="days-table" class="grid"></table></div>
+    </section>
     <section id="tab-trend" class="tab" role="tabpanel" hidden>
-      <div class="toolbar">
-        <label class="inline">Недель
-          <select id="trend-count">
-            <option>4</option><option selected>8</option><option>12</option><option>26</option>
-          </select>
-        </label>
-        <div class="dimfilter">
-          <select class="dim-key" aria-label="Разрез"></select>
-          <select class="dim-value" aria-label="Значение разреза" hidden></select>
-        </div>
-      </div>
       <div class="table-wrap"><table id="trend-table" class="grid"></table></div>
     </section>
 
-    <!-- Загрузка файлов -->
     <section id="tab-upload" class="tab" role="tabpanel" hidden>
       <label id="dropzone" class="dropzone">
         <input id="file-input" type="file" accept=".xlsx,.xlsm" multiple hidden>
         <strong>Перетащи xlsx сюда</strong> или нажми, чтобы выбрать.
-        <span class="muted">Новый файл того же источника заменяет данные за свой период.</span>
+        <span class="muted">Формат 1С: Дата, Код и Наименование номенклатуры, Единица измерения,
+          Количество, Количество базовых. Новый файл того же источника заменяет данные за свой период.</span>
       </label>
       <form id="upload-form" hidden>
-        <table class="grid compact" id="pending-table">
-          <thead><tr><th>Файл</th><th>Источник</th><th></th></tr></thead>
+        <div class="table-wrap"><table class="grid compact" id="pending-table">
+          <thead><tr><th>Файл</th><th>Источник (колонка в сводной)</th><th></th></tr></thead>
           <tbody></tbody>
-        </table>
+        </table></div>
         <datalist id="sources-list"></datalist>
         <button class="btn primary" type="submit">Загрузить</button>
       </form>
@@ -75,29 +72,30 @@
       <div class="table-wrap"><table id="uploads-table" class="grid compact"></table></div>
     </section>
 
-    <!-- Настройка метрик -->
-    <section id="tab-metrics" class="tab" role="tabpanel" hidden>
+    <section id="tab-sources" class="tab" role="tabpanel" hidden>
       <p class="hint">
-        Агрегация за неделю: <b>сумма</b> — складываем дни (выручка, заказы);
-        <b>среднее</b> — средневзвешенное по строкам (средний чек, конверсия);
-        <b>последнее</b> — значение последнего дня (остатки).
+        Источник — это колонка в сводной. <b>Сумма</b> складывает дни периода (выпуск, отгрузка, заказы).
+        <b>Остаток</b> берёт значение на последний день периода — для срезов остатков суммировать дни нельзя.
       </p>
-      <div class="table-wrap"><table id="metrics-table" class="grid compact"></table></div>
+      <div class="table-wrap"><table id="sources-table" class="grid compact"></table></div>
     </section>
 
-    <!-- Панель графика выбранной метрики -->
-    <section id="chart-panel" class="chart-panel viz-root" hidden>
-      <div class="chart-head">
+    <!-- Карточка товара -->
+    <section id="detail" class="detail viz-root" hidden>
+      <div class="detail-head">
         <div>
-          <div id="chart-source" class="muted"></div>
-          <h2 id="chart-title"></h2>
+          <div id="detail-cat" class="muted"></div>
+          <h2 id="detail-title"></h2>
         </div>
-        <button id="chart-close" class="btn icon" aria-label="Закрыть график">✕</button>
+        <button id="detail-close" class="btn icon" aria-label="Закрыть карточку">✕</button>
       </div>
-      <h3 class="chart-sub">По неделям</h3>
-      <div id="chart-weeks" class="chart"></div>
-      <h3 class="chart-sub">По дням</h3>
-      <div id="chart-days" class="chart"></div>
+      <h3 class="sub" id="detail-week"></h3>
+      <div class="table-wrap"><table id="detail-table" class="grid compact"></table></div>
+      <div class="chart-head">
+        <h3 class="sub">По неделям, 12 нед.</h3>
+        <select id="detail-source" aria-label="Источник для графика"></select>
+      </div>
+      <div id="detail-chart" class="chart"></div>
     </section>
   </main>
 

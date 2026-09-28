@@ -1,7 +1,8 @@
-"""Загрузка фактов в БД и сборка недельных/дневных таблиц."""
+"""Загрузка движений в БД и сборка таблиц: товары × источники за неделю или день."""
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections import defaultdict
 
 from .parser import ParsedFile
@@ -9,10 +10,15 @@ from .parser import ParsedFile
 DAY = dt.timedelta(days=1)
 WEEK = dt.timedelta(days=7)
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+LAST_RE = re.compile(r"остат|сальдо|на конец", re.I)
 
 
 def monday(d: dt.date) -> dt.date:
     return d - dt.timedelta(days=d.weekday())
+
+
+def week_days(start: dt.date) -> list[dt.date]:
+    return [start + i * DAY for i in range(7)]
 
 
 def week_info(start: dt.date) -> dict:
@@ -26,94 +32,9 @@ def week_info(start: dt.date) -> dict:
     }
 
 
-# ---------- загрузка ----------
-
-def ingest(conn, filename: str, source: str, parsed: ParsedFile) -> dict:
-    days = parsed.days
-    with conn.transaction():
-        up_id = conn.execute(
-            """INSERT INTO uploads (filename, source, sheets, date_from, date_to, facts)
-               VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
-            (filename, source, parsed.sheets, days[0], days[-1], len(parsed.facts)),
-        ).fetchone()["id"]
-
-        metric_ids = {}
-        for pos, (name, agg) in enumerate(parsed.metrics.items()):
-            # DO UPDATE-заглушка нужна, чтобы RETURNING вернул id и у существующей метрики;
-            # агрегацию существующей метрики не трогаем — её могли поменять руками.
-            metric_ids[name] = conn.execute(
-                """INSERT INTO metrics (source, name, agg, position) VALUES (%s, %s, %s, %s)
-                   ON CONFLICT (source, name) DO UPDATE SET source = EXCLUDED.source
-                   RETURNING id""",
-                (source, name, agg, pos),
-            ).fetchone()["id"]
-
-        # Новый файл того же источника заменяет данные за свой период.
-        replaced = conn.execute(
-            """DELETE FROM facts f USING metrics m
-               WHERE f.metric_id = m.id AND m.source = %s AND f.day BETWEEN %s AND %s""",
-            (source, days[0], days[-1]),
-        ).rowcount
-
-        with conn.cursor().copy(
-            "COPY facts (metric_id, upload_id, day, dims, value, n) FROM STDIN"
-        ) as cp:
-            for (name, day, dims), (s, n) in parsed.facts.items():
-                cp.write_row((metric_ids[name], up_id, day, dims, s, n))
-
-        conn.execute(
-            """DELETE FROM uploads u
-               WHERE u.source = %s AND u.id <> %s
-                 AND NOT EXISTS (SELECT 1 FROM facts f WHERE f.upload_id = u.id)""",
-            (source, up_id),
-        )
-    return {
-        "upload_id": up_id,
-        "source": source,
-        "sheets": parsed.sheets,
-        "metrics": len(parsed.metrics),
-        "date_from": days[0].isoformat(),
-        "date_to": days[-1].isoformat(),
-        "facts": len(parsed.facts),
-        "replaced": replaced,
-        "warnings": parsed.warnings,
-    }
-
-
-# ---------- агрегация ----------
-
-def _daily(conn, date_from: dt.date, date_to: dt.date, dim_key=None, dim_value=None):
-    """metric_id -> {день: (сумма, кол-во)} с учётом фильтра по разрезу."""
-    sql = """SELECT metric_id, day, SUM(value) AS s, SUM(n) AS n
-             FROM facts WHERE day BETWEEN %s AND %s"""
-    params: list = [date_from, date_to]
-    if dim_key and dim_value is not None:
-        sql += " AND dims ->> %s = %s"
-        params += [dim_key, dim_value]
-    sql += " GROUP BY metric_id, day"
-    out: dict[int, dict[dt.date, tuple[float, int]]] = defaultdict(dict)
-    for r in conn.execute(sql, params):
-        out[r["metric_id"]][r["day"]] = (r["s"], r["n"])
-    return out
-
-
-def day_value(agg: str, cell) -> float | None:
-    if cell is None:
-        return None
-    s, n = cell
-    return s / n if agg == "avg" and n else s
-
-
-def period_value(agg: str, cells: dict, days: list[dt.date]) -> float | None:
-    present = [(d, cells[d]) for d in days if d in cells]
-    if not present:
-        return None
-    if agg == "sum":
-        return sum(s for _, (s, _) in present)
-    if agg == "avg":
-        total_n = sum(n for _, (_, n) in present)
-        return sum(s for _, (s, _) in present) / total_n if total_n else None
-    return max(present)[1][0]  # last: значение последнего дня с данными
+def day_info(d: dt.date) -> dict:
+    wd = WEEKDAYS[d.weekday()]
+    return {"date": d.isoformat(), "label": f"{wd} {d:%d.%m.%Y}", "short": f"{wd} {d:%d.%m}"}
 
 
 def delta(cur, prev):
@@ -122,120 +43,284 @@ def delta(cur, prev):
     return (cur - prev) / abs(prev)
 
 
-def _metrics(conn, include_hidden=False):
-    sql = """SELECT id, source, name, COALESCE(label, name) AS title, agg, hidden, position
-             FROM metrics"""
-    if not include_hidden:
-        sql += " WHERE NOT hidden"
-    return conn.execute(sql + " ORDER BY source, position, id").fetchall()
+# ---------- загрузка ----------
 
+def ingest(conn, filename: str, source_name: str, parsed: ParsedFile) -> dict:
+    days = parsed.days
+    with conn.transaction():
+        src = conn.execute(
+            """INSERT INTO sources (name, agg, position)
+               VALUES (%s, %s, (SELECT COALESCE(MAX(position), 0) + 1 FROM sources))
+               ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+               RETURNING id, agg""",
+            (source_name, "last" if LAST_RE.search(source_name) else "sum"),
+        ).fetchone()
 
-def _group(rows: list[dict]) -> list[dict]:
-    groups: dict[str, list] = {}
-    for row in rows:
-        groups.setdefault(row.pop("source"), []).append(row)
-    return [{"source": s, "rows": r} for s, r in groups.items()]
+        with conn.cursor() as cur:
+            cur.executemany(
+                """INSERT INTO items (code, uid, name, base_unit, pack_size, category)
+                   VALUES (%s, %s, %s, %s, %s, %s)
+                   ON CONFLICT (code) DO UPDATE SET
+                       uid = COALESCE(EXCLUDED.uid, items.uid),
+                       name = EXCLUDED.name,
+                       base_unit = EXCLUDED.base_unit,
+                       pack_size = COALESCE(EXCLUDED.pack_size, items.pack_size),
+                       category = EXCLUDED.category""",
+                [(i.code, i.uid, i.name, i.base_unit, i.pack_size, i.category) for i in parsed.items.values()],
+            )
 
+        upload_id = conn.execute(
+            """INSERT INTO uploads (source_id, filename, date_from, date_to, rows)
+               VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+            (src["id"], filename, days[0], days[-1], parsed.rows),
+        ).fetchone()["id"]
 
-def week_table(conn, start: dt.date, dim_key=None, dim_value=None) -> dict:
-    start = monday(start)
-    prev_start = start - WEEK
-    days = [start + i * DAY for i in range(7)]
-    prev_days = [prev_start + i * DAY for i in range(7)]
-    daily = _daily(conn, prev_start, days[-1], dim_key, dim_value)
+        # Новый файл того же источника заменяет его данные за свой период.
+        replaced = conn.execute(
+            "DELETE FROM movements WHERE source_id = %s AND day BETWEEN %s AND %s",
+            (src["id"], days[0], days[-1]),
+        ).rowcount
 
-    rows = []
-    for m in _metrics(conn):
-        cells = daily.get(m["id"])
-        if not cells:
-            continue
-        cur = period_value(m["agg"], cells, days)
-        prev = period_value(m["agg"], cells, prev_days)
-        if cur is None and prev is None:
-            continue
-        rows.append({
-            "source": m["source"],
-            "metric_id": m["id"],
-            "name": m["title"],
-            "agg": m["agg"],
-            "days": [day_value(m["agg"], cells.get(d)) for d in days],
-            "total": cur,
-            "prev": prev,
-            "delta": delta(cur, prev),
-        })
+        with conn.cursor().copy(
+            "COPY movements (source_id, upload_id, day, item_code, qty, qty_base) FROM STDIN"
+        ) as cp:
+            for (day, code), (qty, qty_base) in parsed.movements.items():
+                cp.write_row((src["id"], upload_id, day, code, qty, qty_base))
 
-    weeks = available_weeks(conn)
-    starts = [w["start"] for w in weeks]
-    iso = start.isoformat()
-    older = [s for s in starts if s < iso]
-    newer = [s for s in starts if s > iso]
+        conn.execute(
+            """DELETE FROM uploads u
+               WHERE u.source_id = %s AND u.id <> %s
+                 AND NOT EXISTS (SELECT 1 FROM movements m WHERE m.upload_id = u.id)""",
+            (src["id"], upload_id),
+        )
     return {
-        "week": week_info(start),
-        "days": [{"date": d.isoformat(), "label": f"{WEEKDAYS[i]} {d:%d.%m}"} for i, d in enumerate(days)],
-        "groups": _group(rows),
-        "prev_week": max(older) if older else None,
-        "next_week": min(newer) if newer else None,
+        "upload_id": upload_id,
+        "source": source_name,
+        "date_from": days[0].isoformat(),
+        "date_to": days[-1].isoformat(),
+        "rows": parsed.rows,
+        "items": len(parsed.items),
+        "replaced": replaced,
+        "warnings": parsed.warnings,
     }
 
 
-def trend_table(conn, end: dt.date, count: int, dim_key=None, dim_value=None) -> dict:
+# ---------- справочники ----------
+
+def sources(conn) -> list[dict]:
+    return conn.execute(
+        """SELECT s.id, s.name, s.agg, s.position, s.hidden,
+                  MIN(u.date_from) AS date_from, MAX(u.date_to) AS date_to,
+                  COUNT(u.id) AS uploads
+           FROM sources s LEFT JOIN uploads u ON u.source_id = s.id
+           GROUP BY s.id ORDER BY s.position, s.id"""
+    ).fetchall()
+
+
+def meta(conn) -> dict:
+    days = [r["day"] for r in conn.execute("SELECT DISTINCT day FROM movements ORDER BY day DESC")]
+    weeks = sorted({monday(d) for d in days}, reverse=True)
+    return {
+        "sources": sources(conn),
+        "weeks": [week_info(w) for w in weeks],
+        "days": [day_info(d) for d in days],
+    }
+
+
+# ---------- агрегация ----------
+
+def _load(conn, days: list[dt.date], source_id=None, code=None):
+    """(source_id, код) -> {день: qty_base} и source_id -> дни, где у источника есть данные.
+    Дни источника считаются по всем товарам: они нужны агрегации «last»."""
+    where = "day = ANY(%s)"
+    params: list = [days]
+    if source_id is not None:
+        where += " AND source_id = %s"
+        params.append(source_id)
+
+    source_days: dict[int, set[dt.date]] = defaultdict(set)
+    for r in conn.execute(f"SELECT DISTINCT source_id, day FROM movements WHERE {where}", params):
+        source_days[r["source_id"]].add(r["day"])
+
+    if code is not None:
+        where += " AND item_code = %s"
+        params.append(code)
+    data: dict[tuple[int, str], dict[dt.date, float]] = defaultdict(dict)
+    for r in conn.execute(f"SELECT source_id, item_code, day, qty_base FROM movements WHERE {where}", params):
+        data[(r["source_id"], r["item_code"])][r["day"]] = r["qty_base"]
+    return data, source_days
+
+
+def aggregate(agg: str, cells: dict, days: list[dt.date], source_days: set) -> float | None:
+    """sum — сумма по дням периода; last — значение на последний день периода,
+    за который у источника вообще есть данные (срез остатков)."""
+    if agg == "last":
+        present = [d for d in days if d in source_days]
+        return cells.get(max(present)) if present else None
+    vals = [cells[d] for d in days if d in cells]
+    return sum(vals) if vals else None
+
+
+def _coverage(conn, days: list[dt.date]) -> dict[int, int]:
+    """Сколько дней периода покрыто загруженными файлами каждого источника."""
+    cov: dict[int, set] = defaultdict(set)
+    for r in conn.execute(
+        "SELECT source_id, date_from, date_to FROM uploads WHERE date_to >= %s AND date_from <= %s",
+        (days[0], days[-1]),
+    ):
+        cov[r["source_id"]].update(d for d in days if r["date_from"] <= d <= r["date_to"])
+    return {sid: len(ds) for sid, ds in cov.items()}
+
+
+def _items(conn, codes) -> dict[str, dict]:
+    rows = conn.execute(
+        "SELECT code, name, base_unit, pack_size, category FROM items WHERE code = ANY(%s)",
+        (list(codes),),
+    )
+    return {r["code"]: r for r in rows}
+
+
+def _item_row(item: dict) -> dict:
+    return {
+        "code": item["code"],
+        "name": item["name"],
+        "category": item["category"],
+        "unit": item["base_unit"],
+        "pack": item["pack_size"],
+    }
+
+
+def _sort(rows: list[dict]) -> list[dict]:
+    return sorted(rows, key=lambda r: (r["category"], r["name"]))
+
+
+def pivot(conn, mode: str, date: dt.date) -> dict:
+    """Сводная: товары × источники за неделю (mode=week) или день (mode=day).
+    Сравнение: с прошлой неделей / с тем же днём прошлой недели."""
+    if mode == "week":
+        start = monday(date)
+        days, prev_days = week_days(start), week_days(start - WEEK)
+        period = {**week_info(start), "compare": "к пред. неделе"}
+    else:
+        days, prev_days = [date], [date - WEEK]
+        period = {**day_info(date), "compare": "к тому же дню пред. недели"}
+
+    srcs = [s for s in sources(conn) if not s["hidden"]]
+    data, source_days = _load(conn, days + prev_days)
+    items = _items(conn, {code for _, code in data})
+    coverage = _coverage(conn, days)
+
+    rows = []
+    for code, item in items.items():
+        values, has_any = [], False
+        for s in srcs:
+            cells = data.get((s["id"], code), {})
+            cur = aggregate(s["agg"], cells, days, source_days[s["id"]])
+            prev = aggregate(s["agg"], cells, prev_days, source_days[s["id"]])
+            has_any |= cur is not None or prev is not None
+            values.append({"cur": cur, "prev": prev, "delta": delta(cur, prev)})
+        if has_any:
+            rows.append({**_item_row(item), "values": values})
+
+    return {
+        "mode": mode,
+        "period": period,
+        "days": [day_info(d) for d in days],
+        "sources": [
+            {"id": s["id"], "name": s["name"], "agg": s["agg"],
+             "covered": coverage.get(s["id"], 0), "of": len(days)}
+            for s in srcs
+        ],
+        "rows": _sort(rows),
+    }
+
+
+def _source(conn, source_id: int) -> dict | None:
+    return conn.execute("SELECT id, name, agg FROM sources WHERE id = %s", (source_id,)).fetchone()
+
+
+def by_days(conn, date: dt.date, source_id: int) -> dict | None:
+    """Один источник: товары × дни недели + итог, прошлая неделя, Δ."""
+    src = _source(conn, source_id)
+    if not src:
+        return None
+    start = monday(date)
+    days, prev_days = week_days(start), week_days(start - WEEK)
+    data, source_days = _load(conn, days + prev_days, source_id)
+    items = _items(conn, {code for _, code in data})
+    sd = source_days[source_id]
+
+    rows = []
+    for code, item in items.items():
+        cells = data[(source_id, code)]
+        total = aggregate(src["agg"], cells, days, sd)
+        prev = aggregate(src["agg"], cells, prev_days, sd)
+        if total is None and prev is None:
+            continue
+        rows.append({
+            **_item_row(item),
+            "days": [cells.get(d) for d in days],
+            "total": total,
+            "prev": prev,
+            "delta": delta(total, prev),
+        })
+    return {
+        "period": week_info(start),
+        "days": [day_info(d) for d in days],
+        "source": src,
+        "covered": _coverage(conn, days).get(source_id, 0),
+        "rows": _sort(rows),
+    }
+
+
+def trend(conn, end: dt.date, count: int, source_id: int) -> dict | None:
+    """Один источник: товары × последние N недель."""
+    src = _source(conn, source_id)
+    if not src:
+        return None
     last = monday(end)
     starts = [last - (count - 1 - i) * WEEK for i in range(count)]
-    daily = _daily(conn, starts[0], last + 6 * DAY, dim_key, dim_value)
-    week_days = [[s + i * DAY for i in range(7)] for s in starts]
+    all_days = [starts[0] + i * DAY for i in range(7 * count)]
+    data, source_days = _load(conn, all_days, source_id)
+    items = _items(conn, {code for _, code in data})
+    sd = source_days[source_id]
 
     rows = []
-    for m in _metrics(conn):
-        cells = daily.get(m["id"])
-        if not cells:
-            continue
-        values = [period_value(m["agg"], cells, wd) for wd in week_days]
-        rows.append({
-            "source": m["source"],
-            "metric_id": m["id"],
-            "name": m["title"],
-            "agg": m["agg"],
-            "values": values,
-            "delta": delta(values[-1], values[-2]) if count > 1 else None,
-        })
-    return {"weeks": [week_info(s) for s in starts], "groups": _group(rows)}
+    for code, item in items.items():
+        cells = data[(source_id, code)]
+        values = [aggregate(src["agg"], cells, week_days(s), sd) for s in starts]
+        rows.append({**_item_row(item), "values": values, "delta": delta(values[-1], values[-2])})
+    return {"weeks": [week_info(s) for s in starts], "source": src, "rows": _sort(rows)}
 
 
-def series(conn, metric_id: int, date_from: dt.date, date_to: dt.date, dim_key=None, dim_value=None):
-    m = conn.execute(
-        "SELECT id, source, COALESCE(label, name) AS title, agg FROM metrics WHERE id = %s",
-        (metric_id,),
-    ).fetchone()
-    if not m:
+def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
+    """Карточка товара: источники × дни выбранной недели + ряды по неделям."""
+    item = _items(conn, [code]).get(code)
+    if not item:
         return None
-    date_from, date_to = monday(date_from), monday(date_to) + 6 * DAY
-    cells = _daily(conn, date_from, date_to, dim_key, dim_value).get(metric_id, {})
-    days, d = [], date_from
-    while d <= date_to:
-        days.append(d)
-        d += DAY
-    weeks = []
-    for i in range(0, len(days), 7):
-        chunk = days[i:i + 7]
-        weeks.append({**week_info(chunk[0]), "value": period_value(m["agg"], cells, chunk)})
+    start = monday(date)
+    days = week_days(start)
+    starts = [start - (weeks - 1 - i) * WEEK for i in range(weeks)]
+    all_days = [starts[0] + i * DAY for i in range(7 * weeks)]
+    data, source_days = _load(conn, all_days, code=code)
+
+    out = []
+    for s in sources(conn):
+        if s["hidden"]:
+            continue
+        cells = data.get((s["id"], code), {})
+        sd = source_days[s["id"]]
+        out.append({
+            "id": s["id"],
+            "name": s["name"],
+            "agg": s["agg"],
+            "days": [cells.get(d) for d in days],
+            "total": aggregate(s["agg"], cells, days, sd),
+            "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w), sd)} for w in starts],
+        })
     return {
-        "metric": {"id": m["id"], "source": m["source"], "name": m["title"], "agg": m["agg"]},
-        "days": [{"date": d.isoformat(), "value": day_value(m["agg"], cells.get(d))} for d in days],
-        "weeks": weeks,
+        "item": _item_row(item),
+        "period": week_info(start),
+        "days": [day_info(d) for d in days],
+        "sources": out,
     }
-
-
-def available_weeks(conn) -> list[dict]:
-    rows = conn.execute(
-        "SELECT DISTINCT date_trunc('week', day)::date AS wk FROM facts ORDER BY wk DESC"
-    ).fetchall()
-    return [week_info(r["wk"]) for r in rows]
-
-
-def dimensions(conn) -> dict[str, list[str]]:
-    rows = conn.execute(
-        """SELECT e.key, array_agg(DISTINCT e.value ORDER BY e.value) AS vals
-           FROM (SELECT DISTINCT dims FROM facts) d, jsonb_each_text(d.dims) e
-           GROUP BY e.key ORDER BY e.key"""
-    ).fetchall()
-    return {r["key"]: r["vals"] for r in rows}

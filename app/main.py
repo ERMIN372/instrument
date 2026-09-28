@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
+import psycopg
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -50,20 +51,26 @@ async def basic_auth(request: Request, call_next):
     return await call_next(request)
 
 
-def _date(value: str | None, default: dt.date | None = None) -> dt.date:
-    if not value:
-        if default is None:
-            raise HTTPException(400, "Нужна дата")
-        return default
-    try:
-        return dt.date.fromisoformat(value)
-    except ValueError:
-        raise HTTPException(400, f"Кривая дата: {value}") from None
+@app.exception_handler(HTTPException)
+async def http_error(_request, exc: HTTPException):
+    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
 
-def _latest_week(conn) -> dt.date:
-    weeks = service.available_weeks(conn)
-    return dt.date.fromisoformat(weeks[0]["start"]) if weeks else service.monday(dt.date.today())
+def _date(value: str | None, conn=None) -> dt.date:
+    """Дата из запроса; без неё — последний день с данными (или сегодня)."""
+    if value:
+        try:
+            return dt.date.fromisoformat(value)
+        except ValueError:
+            raise HTTPException(400, f"Кривая дата: {value}") from None
+    row = conn.execute("SELECT MAX(day) AS d FROM movements").fetchone() if conn else None
+    return (row and row["d"]) or dt.date.today()
+
+
+def _found(value, what: str):
+    if value is None:
+        raise HTTPException(404, f"Нет такого: {what}")
+    return value
 
 
 @app.get("/healthz")
@@ -73,12 +80,12 @@ def healthz():
     return {"ok": True}
 
 
+# ---------- загрузка ----------
+
 def _ingest_file(name: str, source: str, data: bytes) -> dict:
     if len(data) > MAX_FILE_MB * 1024 * 1024:
         raise ValueError(f"файл больше {MAX_FILE_MB} МБ")
     parsed = parse_xlsx(data)
-    if not parsed.facts:
-        raise ValueError("не нашёл ни одной даты с числами. " + "; ".join(parsed.warnings))
     with db.pool.connection() as conn:
         return service.ingest(conn, name, source, parsed)
 
@@ -107,8 +114,9 @@ def source_name(filename: str):
 def uploads():
     with db.pool.connection() as conn:
         return conn.execute(
-            """SELECT id, filename, source, sheets, date_from, date_to, facts, uploaded_at
-               FROM uploads ORDER BY uploaded_at DESC"""
+            """SELECT u.id, u.filename, s.name AS source, u.date_from, u.date_to, u.rows, u.uploaded_at
+               FROM uploads u JOIN sources s ON s.id = u.source_id
+               ORDER BY u.uploaded_at DESC"""
         ).fetchall()
 
 
@@ -121,98 +129,97 @@ def delete_upload(upload_id: int):
     return {"ok": True}
 
 
-@app.get("/api/sources")
-def sources():
-    with db.pool.connection() as conn:
-        rows = conn.execute("SELECT DISTINCT source FROM metrics ORDER BY source").fetchall()
-    return [r["source"] for r in rows]
+# ---------- источники ----------
 
-
-@app.get("/api/weeks")
-def weeks():
-    with db.pool.connection() as conn:
-        return service.available_weeks(conn)
-
-
-@app.get("/api/dims")
-def dims():
-    with db.pool.connection() as conn:
-        return service.dimensions(conn)
-
-
-@app.get("/api/week")
-def week(start: str | None = None, dim_key: str | None = None, dim_value: str | None = None):
-    with db.pool.connection() as conn:
-        day = _date(start, _latest_week(conn))
-        return service.week_table(conn, day, dim_key, dim_value)
-
-
-@app.get("/api/trend")
-def trend(end: str | None = None, count: int = 8, dim_key: str | None = None, dim_value: str | None = None):
-    count = max(2, min(count, 52))
-    with db.pool.connection() as conn:
-        day = _date(end, _latest_week(conn))
-        return service.trend_table(conn, day, count, dim_key, dim_value)
-
-
-@app.get("/api/series/{metric_id}")
-def series(metric_id: int, date_from: str, date_to: str, dim_key: str | None = None, dim_value: str | None = None):
-    with db.pool.connection() as conn:
-        res = service.series(conn, metric_id, _date(date_from), _date(date_to), dim_key, dim_value)
-    if res is None:
-        raise HTTPException(404, "Нет такой метрики")
-    return res
-
-
-@app.get("/api/metrics")
-def metrics():
-    with db.pool.connection() as conn:
-        return conn.execute(
-            """SELECT m.id, m.source, m.name, m.label, m.agg, m.hidden,
-                      (SELECT MAX(day) FROM facts f WHERE f.metric_id = m.id) AS last_day
-               FROM metrics m ORDER BY m.source, m.position, m.id"""
-        ).fetchall()
-
-
-class MetricPatch(BaseModel):
-    label: str | None = None
+class SourcePatch(BaseModel):
+    name: str | None = None
     agg: str | None = None
     hidden: bool | None = None
+    position: int | None = None
 
 
-@app.patch("/api/metrics/{metric_id}")
-def patch_metric(metric_id: int, body: MetricPatch):
-    if body.agg is not None and body.agg not in ("sum", "avg", "last"):
-        raise HTTPException(400, "agg: sum | avg | last")
+@app.patch("/api/sources/{source_id}")
+def patch_source(source_id: int, body: SourcePatch):
     fields = body.model_dump(exclude_unset=True)
-    if "label" in fields:
-        fields["label"] = (fields["label"] or "").strip() or None
+    if "agg" in fields and fields["agg"] not in ("sum", "last"):
+        raise HTTPException(400, "agg: sum | last")
+    if "name" in fields:
+        fields["name"] = (fields["name"] or "").strip()
+        if not fields["name"]:
+            raise HTTPException(400, "Пустое имя источника")
     if not fields:
         return {"ok": True}
-    sets = ", ".join(f"{k} = %s" for k in fields)
-    with db.pool.connection() as conn:
-        n = conn.execute(f"UPDATE metrics SET {sets} WHERE id = %s", [*fields.values(), metric_id]).rowcount
+    sets = ", ".join(f"{k} = %s" for k in fields)  # ключи — только поля модели
+    try:
+        with db.pool.connection() as conn:
+            n = conn.execute(f"UPDATE sources SET {sets} WHERE id = %s", [*fields.values(), source_id]).rowcount
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "Источник с таким именем уже есть") from None
     if not n:
-        raise HTTPException(404, "Нет такой метрики")
+        raise HTTPException(404, "Нет такого источника")
     return {"ok": True}
 
 
-@app.get("/api/export/week.xlsx")
-def export_week(start: str | None = None, dim_key: str | None = None, dim_value: str | None = None):
+@app.delete("/api/sources/{source_id}")
+def delete_source(source_id: int):
     with db.pool.connection() as conn:
-        day = _date(start, _latest_week(conn))
-        table = service.week_table(conn, day, dim_key, dim_value)
-    fname = f"instrument_{table['week']['iso']}.xlsx"
+        n = conn.execute("DELETE FROM sources WHERE id = %s", (source_id,)).rowcount
+    if not n:
+        raise HTTPException(404, "Нет такого источника")
+    return {"ok": True}
+
+
+# ---------- таблицы ----------
+
+@app.get("/api/meta")
+def meta():
+    with db.pool.connection() as conn:
+        return service.meta(conn)
+
+
+@app.get("/api/pivot")
+def pivot(mode: str = "week", date: str | None = None):
+    if mode not in ("week", "day"):
+        raise HTTPException(400, "mode: week | day")
+    with db.pool.connection() as conn:
+        return service.pivot(conn, mode, _date(date, conn))
+
+
+@app.get("/api/by-days")
+def by_days(source_id: int, date: str | None = None):
+    with db.pool.connection() as conn:
+        return _found(service.by_days(conn, _date(date, conn), source_id), "источник")
+
+
+@app.get("/api/trend")
+def trend(source_id: int, end: str | None = None, count: int = 8):
+    count = max(2, min(count, 52))
+    with db.pool.connection() as conn:
+        return _found(service.trend(conn, _date(end, conn), count, source_id), "источник")
+
+
+@app.get("/api/item/{code:path}")
+def item(code: str, date: str | None = None):
+    with db.pool.connection() as conn:
+        return _found(service.item_detail(conn, code, _date(date, conn)), "товар")
+
+
+@app.get("/api/export.xlsx")
+def export_xlsx(mode: str = "week", date: str | None = None, category: str | None = None, q: str | None = None):
+    if mode not in ("week", "day"):
+        raise HTTPException(400, "mode: week | day")
+    with db.pool.connection() as conn:
+        day = _date(date, conn)
+        table = service.pivot(conn, mode, day)
+        days = [service.by_days(conn, day, s["id"]) for s in table["sources"]]
+    content = export.workbook(table, days, category, q)
+    period = table["period"].get("iso") or table["period"]["date"]
+    fname = f"instrument_{period}.xlsx"
     return Response(
-        export.week_xlsx(table),
+        content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(fname)}"},
     )
-
-
-@app.exception_handler(HTTPException)
-async def http_error(_request, exc: HTTPException):
-    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
 
 
 @app.get("/")
