@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Instrument — недельная аналитика</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Instrument</div>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-tab="week" aria-selected="true">Неделя</button>
+      <button role="tab" data-tab="trend">Динамика</button>
+      <button role="tab" data-tab="upload">Загрузка</button>
+      <button role="tab" data-tab="metrics">Метрики</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Неделя: единая таблица на учётную неделю -->
+    <section id="tab-week" class="tab" role="tabpanel">
+      <div class="toolbar">
+        <div class="weeknav">
+          <button id="week-prev" class="btn icon" title="Предыдущая неделя" aria-label="Предыдущая неделя">‹</button>
+          <select id="week-select" aria-label="Неделя"></select>
+          <button id="week-next" class="btn icon" title="Следующая неделя" aria-label="Следующая неделя">›</button>
+        </div>
+        <div class="dimfilter">
+          <select class="dim-key" aria-label="Разрез"></select>
+          <select class="dim-value" aria-label="Значение разреза" hidden></select>
+        </div>
+        <a id="week-export" class="btn" href="#">Скачать xlsx</a>
+      </div>
+      <div id="week-empty" class="empty" hidden>
+        Данных пока нет. Загрузи xlsx на вкладке «Загрузка».
+      </div>
+      <div class="table-wrap"><table id="week-table" class="grid"></table></div>
+      <p class="hint">Клик по строке — график метрики по неделям и дням.</p>
+    </section>
+
+    <!-- Динамика: метрики × последние N недель -->
+    <section id="tab-trend" class="tab" role="tabpanel" hidden>
+      <div class="toolbar">
+        <label class="inline">Недель
+          <select id="trend-count">
+            <option>4</option><option selected>8</option><option>12</option><option>26</option>
+          </select>
+        </label>
+        <div class="dimfilter">
+          <select class="dim-key" aria-label="Разрез"></select>
+          <select class="dim-value" aria-label="Значение разреза" hidden></select>
+        </div>
+      </div>
+      <div class="table-wrap"><table id="trend-table" class="grid"></table></div>
+    </section>
+
+    <!-- Загрузка файлов -->
+    <section id="tab-upload" class="tab" role="tabpanel" hidden>
+      <label id="dropzone" class="dropzone">
+        <input id="file-input" type="file" accept=".xlsx,.xlsm" multiple hidden>
+        <strong>Перетащи xlsx сюда</strong> или нажми, чтобы выбрать.
+        <span class="muted">Новый файл того же источника заменяет данные за свой период.</span>
+      </label>
+      <form id="upload-form" hidden>
+        <table class="grid compact" id="pending-table">
+          <thead><tr><th>Файл</th><th>Источник</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <datalist id="sources-list"></datalist>
+        <button class="btn primary" type="submit">Загрузить</button>
+      </form>
+      <div id="upload-results"></div>
+      <h2>История загрузок</h2>
+      <div class="table-wrap"><table id="uploads-table" class="grid compact"></table></div>
+    </section>
+
+    <!-- Настройка метрик -->
+    <section id="tab-metrics" class="tab" role="tabpanel" hidden>
+      <p class="hint">
+        Агрегация за неделю: <b>сумма</b> — складываем дни (выручка, заказы);
+        <b>среднее</b> — средневзвешенное по строкам (средний чек, конверсия);
+        <b>последнее</b> — значение последнего дня (остатки).
+      </p>
+      <div class="table-wrap"><table id="metrics-table" class="grid compact"></table></div>
+    </section>
+
+    <!-- Панель графика выбранной метрики -->
+    <section id="chart-panel" class="chart-panel viz-root" hidden>
+      <div class="chart-head">
+        <div>
+          <div id="chart-source" class="muted"></div>
+          <h2 id="chart-title"></h2>
+        </div>
+        <button id="chart-close" class="btn icon" aria-label="Закрыть график">✕</button>
+      </div>
+      <h3 class="chart-sub">По неделям</h3>
+      <div id="chart-weeks" class="chart"></div>
+      <h3 class="chart-sub">По дням</h3>
+      <div id="chart-days" class="chart"></div>
+    </section>
+  </main>
+
+  <div id="tooltip" class="tooltip" role="status" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
