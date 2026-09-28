@@ -13,6 +13,7 @@
   --accent-wash: rgba(42, 120, 214, 0.10);
   --series-1: #2a78d6;
   --warning: #9a6700;
+  --good: #006300;
   --critical: #d03b3b;
   --radius: 8px;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -33,6 +34,7 @@
     --accent-wash: rgba(57, 135, 229, 0.16);
     --series-1: #3987e5;
     --warning: #fab219;
+    --good: #0ca30c;
     --critical: #e66767;
   }
 }
@@ -51,6 +53,7 @@
   --accent-wash: rgba(57, 135, 229, 0.16);
   --series-1: #3987e5;
   --warning: #fab219;
+  --good: #0ca30c;
   --critical: #e66767;
 }
 
@@ -155,6 +158,11 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-var
 .grid td.sep, .grid th.sep { border-left: 1px solid var(--grid); }
 .grid .code { color: var(--text-muted); font-size: 11px; margin-left: 6px; }
 .grid .delta { display: block; font-size: 11px; color: var(--text-muted); }
+/* Рост — зелёный, падение — красный; стрелка дублирует цвет для тех, кто его не различает. */
+.delta.up { color: var(--good); }
+.delta.down { color: var(--critical); }
+.grid .delta.up { color: var(--good); }
+.grid .delta.down { color: var(--critical); }
 .grid tfoot td { background: var(--surface-2); font-weight: 700; border-top: 1px solid var(--axis); }
 /* Главный итог (шт) — последней строкой и прилипает к низу прокрутки. */
 .grid tfoot tr:last-child td { position: sticky; bottom: 0; z-index: 1; }

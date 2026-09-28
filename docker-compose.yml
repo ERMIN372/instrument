@@ -23,7 +23,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-instrument}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-instrument}
       APP_USER: ${APP_USER:-admin}
-      APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD is required}
+      APP_PASSWORD: ${APP_PASSWORD:-}  # пусто — вход без пароля
     ports:
       - "${APP_PORT:-80}:8000"
 

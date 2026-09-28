@@ -57,8 +57,9 @@ SQL
   umask 077
   cat > .env <<EOF
 DATABASE_URL=postgresql://$DB_USER:$DB_PASS@127.0.0.1:$PG_PORT/$DB_NAME
+# Вход по паролю выключен. Включить: вписать пароль и sudo systemctl restart instrument
 APP_USER=admin
-APP_PASSWORD=$(openssl rand -base64 12 | tr -d '/+=')
+APP_PASSWORD=
 EOF
   umask 022
 else
@@ -96,7 +97,7 @@ say "Проверка здоровья"
 for _ in $(seq 1 20); do
   if curl -fsS "http://127.0.0.1:$APP_PORT/healthz" >/dev/null 2>&1; then
     echo "OK: сервис отвечает на http://127.0.0.1:$APP_PORT"
-    grep -E '^APP_(USER|PASSWORD)=' .env | sed 's/^/    /'
+    grep -q '^APP_PASSWORD=.' .env && echo "    вход: admin / пароль из .env" || echo "    вход без пароля"
     echo "Дальше — nginx: deploy/nginx-instrument.conf"
     exit 0
   fi

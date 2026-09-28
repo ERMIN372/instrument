@@ -62,9 +62,9 @@ tests/                 тесты парсера и API
 ## Локальный запуск
 
 ```bash
-echo -e "POSTGRES_PASSWORD=dev\nAPP_PASSWORD=dev" > .env
+echo "POSTGRES_PASSWORD=dev" > .env
 docker compose up -d --build
-open http://localhost        # логин admin / dev
+open http://localhost
 ```
 
 Тесты (API-тесты идут на настоящем PostgreSQL и **очищают** указанную БД — дай отдельную):
@@ -156,14 +156,14 @@ VM_HOST=<IP> bash deploy/deploy.sh
 ```
 
 При первом запуске создаётся локальный `.env` со случайными паролями
-(БД и вход на сайт — `APP_USER` / `APP_PASSWORD`). **Не теряй и не коммить его**:
+(пароль БД; вход на сайт по умолчанию без пароля). **Не теряй и не коммить его**:
 пароль БД зашит в уже созданный том PostgreSQL. Повторный `deploy.sh` — это
 обновление кода, данные в БД сохраняются.
 
 #### 3. Проверка и диагностика
 
 ```bash
-curl -u admin:<APP_PASSWORD> http://<IP>/api/meta         # API отвечает
+curl http://<IP>/api/meta         # API отвечает
 ssh deploy@<IP> 'cd instrument && docker compose ps'        # оба контейнера Up/healthy
 ssh deploy@<IP> 'cd instrument && docker compose logs --tail=100 app'
 ssh deploy@<IP> 'cd instrument && docker compose logs --tail=100 db'
@@ -178,7 +178,7 @@ ssh deploy@<IP> 'sudo cat /var/log/cloud-init-output.log'  # если Docker н�
 | `docker: permission denied` по ssh | группа docker применяется к новым сессиям — переподключись |
 | `pull access denied` / таймаут на образах | Docker Hub недоступен; в `daemon.json` уже прописано зеркало `mirror.gcr.io`, проверь `docker info \| grep -A1 Mirrors` |
 | `password authentication failed` в логах app | `.env` пересоздан после первого запуска. Верни старый пароль или (данные потеряются!) `docker compose down -v` |
-| 401 в браузере | логин/пароль из `.env` (`APP_USER` / `APP_PASSWORD`) |
+| 401 в браузере | в `.env` задан `APP_PASSWORD` — логин `admin` и этот пароль |
 
 ## Бэкапы БД
 
@@ -215,8 +215,11 @@ docker compose start app
 
 ## Безопасность — важно
 
-* Сайт защищён HTTP Basic Auth. Публикуй его **только через HTTPS** (nginx с сертификатом):
-  по голому HTTP пароль идёт открытым текстом. В варианте без Docker приложение
+* **По умолчанию вход без пароля**: любой, кто знает адрес, видит данные и может
+  загружать/удалять файлы. Защитить можно двумя способами:
+  * пароль (HTTP Basic Auth): `APP_PASSWORD=<пароль>` в `.env` и `sudo systemctl restart instrument`
+    (логин — `APP_USER`, по умолчанию `admin`); только через HTTPS;
+  * белый список IP в nginx: `allow <IP>; deny all;` внутри `location`. В варианте без Docker приложение
   слушает только `127.0.0.1`, снаружи до него не достучаться в обход nginx.
 * SSH по умолчанию открыт всему интернету; ограничь `SSH_ALLOW_CIDR=<твой IP>/32`
   при создании ВМ.

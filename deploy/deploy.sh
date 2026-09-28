@@ -19,11 +19,11 @@ POSTGRES_DB=instrument
 POSTGRES_USER=instrument
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
 APP_USER=admin
-APP_PASSWORD=$(openssl rand -base64 12 | tr -d '/+=')
+APP_PASSWORD=
 APP_PORT=80
 EOF
   chmod 600 .env
-  echo "    Логин/пароль для сайта лежат в .env (APP_USER / APP_PASSWORD)"
+  echo "    Вход без пароля. Включить: вписать APP_PASSWORD в .env и повторить деплой"
 fi
 
 echo "==> Жду окончания cloud-init на $VM_HOST"
