@@ -107,7 +107,11 @@ async def upload(files: list[UploadFile] = File(...), sources: list[str] = Form(
 
 @app.get("/api/source-name")
 def source_name(filename: str):
-    return {"source": source_from_filename(filename)}
+    """Источник по имени файла; переименованный — под текущим именем."""
+    name = source_from_filename(filename)
+    with db.pool.connection() as conn:
+        src = service.resolve_source(conn, name)
+    return {"source": src["name"] if src else name}
 
 
 @app.get("/api/uploads")
@@ -136,6 +140,7 @@ class SourcePatch(BaseModel):
     agg: str | None = None
     hidden: bool | None = None
     position: int | None = None
+    close_name: str | None = None
 
 
 @app.patch("/api/sources/{source_id}")
@@ -147,12 +152,24 @@ def patch_source(source_id: int, body: SourcePatch):
         fields["name"] = (fields["name"] or "").strip()
         if not fields["name"]:
             raise HTTPException(400, "Пустое имя источника")
+    if "close_name" in fields:
+        fields["close_name"] = (fields["close_name"] or "").strip() or None  # пусто — по имени источника
     if not fields:
         return {"ok": True}
-    sets = ", ".join(f"{k} = %s" for k in fields)  # ключи — только поля модели
+    sets = [f"{k} = %s" for k in fields]  # ключи — только поля модели
+    params = list(fields.values())
+    if "name" in fields:
+        # Старое имя — в алиасы, чтобы файлы со старым именем шли в эту же колонку.
+        # В SET справа name ещё старое.
+        sets.append("aliases = CASE WHEN name = %s THEN aliases"
+                    " ELSE array_append(array_remove(array_remove(aliases, %s), name), name) END")
+        params += [fields["name"], fields["name"]]
     try:
-        with db.pool.connection() as conn:
-            n = conn.execute(f"UPDATE sources SET {sets} WHERE id = %s", [*fields.values(), source_id]).rowcount
+        with db.pool.connection() as conn, conn.transaction():
+            n = conn.execute(f"UPDATE sources SET {', '.join(sets)} WHERE id = %s", [*params, source_id]).rowcount
+            if n and "name" in fields:
+                conn.execute("UPDATE sources SET aliases = array_remove(aliases, %s) WHERE id <> %s",
+                             (fields["name"], source_id))
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "Источник с таким именем уже есть") from None
     if not n:
@@ -211,7 +228,8 @@ def export_xlsx(mode: str = "week", date: str | None = None, category: str | Non
     with db.pool.connection() as conn:
         day = _date(date, conn)
         table = service.pivot(conn, mode, day)
-        days = [service.by_days(conn, day, s["id"]) for s in table["sources"]]
+        ids = dict.fromkeys(c["id"] for c in table["columns"])  # остаток даёт 2 колонки, лист — один
+        days = [service.by_days(conn, day, sid) for sid in ids]
     content = export.workbook(table, days, category, q)
     period = table["period"].get("iso") or table["period"]["date"]
     fname = f"instrument_{period}.xlsx"

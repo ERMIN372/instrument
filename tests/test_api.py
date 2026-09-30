@@ -77,25 +77,37 @@ def test_pivot_week_day_and_replace(client):
     # Выпуск: булка 10/день две недели, хлеб только в W39.
     upload(client, "Выпуск", xlsx(
         [(d, BUN, 10) for d in days(W38, 14)] + [(d, LOAF, 5) for d in days(W39, 7)]))
-    # Остатки: срез на каждый день, неделя должна брать последний день, а не сумму.
-    upload(client, "Остатки", xlsx([(d, BUN, 100 + i) for i, d in enumerate(days(W38, 14))]))
+    # Остатки: срез на каждый день 14.09–28.09, суммировать нельзя.
+    upload(client, "Остатки на начало", xlsx([(d, BUN, 100 + i) for i, d in enumerate(days(W38, 15))]))
 
     meta = client.get("/api/meta").json()
-    assert [s["name"] for s in meta["sources"]] == ["Выпуск", "Остатки"]
+    assert [s["name"] for s in meta["sources"]] == ["Выпуск", "Остатки на начало"]
     assert [s["agg"] for s in meta["sources"]] == ["sum", "last"]  # «остат» в имени
-    assert [w["iso"] for w in meta["weeks"]] == ["2026-W39", "2026-W38"]
+    assert meta["sources"][1]["close_label"] == "Остатки на конец"
+    assert [w["iso"] for w in meta["weeks"]] == ["2026-W40", "2026-W39", "2026-W38"]
 
+    # Неделя 21–27.09: на начало — срез 21.09, на конец — 28.09; колонка «на конец» — последняя.
     p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-23"}).json()
+    assert [(c["name"], c["kind"], c["date"]) for c in p["columns"]] == [
+        ("Выпуск", "sum", None), ("Остатки на начало", "open", "2026-09-21"),
+        ("Остатки на конец", "close", "2026-09-28")]
     rows = {r["code"]: r for r in p["rows"]}
     bun = rows["001"]["values"]
     assert bun[0] == {"cur": 70, "prev": 70, "delta": 0}
-    assert bun[1]["cur"] == 113 and bun[1]["prev"] == 106  # остаток на воскресенье
+    assert bun[1]["cur"] == 107 and bun[1]["prev"] == 100  # 21.09 и 14.09
+    assert bun[2]["cur"] == 114 and bun[2]["prev"] == 107  # 28.09 и 21.09
     assert rows["002"]["values"][0]["cur"] == 35 and rows["002"]["values"][0]["delta"] is None
-    assert [(s["covered"], s["of"]) for s in p["sources"]] == [(7, 7), (7, 7)]
+    assert [(c["covered"], c["of"]) for c in p["columns"]] == [(7, 7), (1, 1), (1, 1)]
+
+    # Среза на 05.10 нет — «на конец» пустая и помечена.
+    p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-28"}).json()
+    assert [(c["covered"], c["of"]) for c in p["columns"]] == [(0, 7), (1, 1), (0, 1)]
+    assert {r["code"]: r for r in p["rows"]}["001"]["values"][2]["cur"] is None
 
     d = client.get("/api/pivot", params={"mode": "day", "date": "2026-09-23"}).json()
     bun = {r["code"]: r for r in d["rows"]}["001"]["values"]
     assert bun[0]["cur"] == 10 and bun[1]["cur"] == 109 and bun[1]["prev"] == 102
+    assert bun[2]["cur"] == 110 and bun[2]["prev"] == 103  # на начало следующего дня
 
     # Повторная загрузка W39 с другими цифрами заменяет только W39.
     res = upload(client, "Выпуск", xlsx([(d, BUN, 1) for d in days(W39, 7)]))
@@ -145,4 +157,44 @@ def test_errors(client):
     assert client.patch(f"/api/sources/{ids[1]}", json={"agg": "avg"}).status_code == 400
     assert client.patch(f"/api/sources/{ids[1]}", json={"hidden": True}).status_code == 200
     p = client.get("/api/pivot", params={"date": "2026-09-21"}).json()
-    assert [s["name"] for s in p["sources"]] == ["А"]
+    assert [c["name"] for c in p["columns"]] == ["А"]
+
+
+def test_rename_keeps_old_name_as_alias(client):
+    upload(client, "ЗаказыПоДням", xlsx([(W39, BUN, 5)]))
+    sid = client.get("/api/meta").json()["sources"][0]["id"]
+    assert client.patch(f"/api/sources/{sid}", json={"name": "Заказ покупателей"}).status_code == 200
+    # Файл со старым именем попадает в переименованную колонку, а не создаёт новую.
+    assert client.get("/api/source-name", params={"filename": "ЗаказыПоДням_сентябрь_2026.xlsx"}).json() == {
+        "source": "Заказ покупателей"}
+    res = upload(client, "", xlsx([(W39 + dt.timedelta(days=1), BUN, 7)]), name="заказыподнЯм_2026.xlsx")
+    assert res["source"] == "Заказ покупателей"
+    meta = client.get("/api/meta").json()
+    assert [(s["name"], s["aliases"]) for s in meta["sources"]] == [("Заказ покупателей", ["ЗаказыПоДням"])]
+    # Возврат старого имени убирает его из алиасов, новое уходит в алиасы.
+    client.patch(f"/api/sources/{sid}", json={"name": "ЗаказыПоДням"})
+    assert client.get("/api/meta").json()["sources"][0]["aliases"] == ["Заказ покупателей"]
+
+
+def test_rename_migration(client):
+    for name in ["ЗаказыПоДням", "ОстаткиПоДням", "ПланПроизводстваПоДням", "Прочее",
+                 "ФактПроизводстваПоДням", "ПланированиеПроизводства"]:
+        upload(client, name, xlsx([(W39, BUN, 1)]))
+    from app import db
+
+    with db.pool.connection() as conn:
+        db.rename_sources(conn)
+    meta = client.get("/api/meta").json()
+    assert [s["name"] for s in meta["sources"]] == [
+        "Остатки на начало периода", "Заказ склада", "План производства",
+        "Выпуск производства", "Заказ покупателей", "Прочее"]
+    assert meta["sources"][0]["close_label"] == "Остатки на конец периода"
+    p = client.get("/api/pivot", params={"date": "2026-09-21"}).json()
+    assert [c["name"] for c in p["columns"]][-1] == "Остатки на конец периода"
+
+    # Повторный запуск ничего не трогает: ручной порядок сохраняется.
+    ids = [s["id"] for s in meta["sources"]]
+    client.patch(f"/api/sources/{ids[5]}", json={"position": 0})
+    with db.pool.connection() as conn:
+        db.rename_sources(conn)
+    assert client.get("/api/meta").json()["sources"][0]["name"] == "Прочее"
