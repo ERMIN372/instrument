@@ -72,8 +72,8 @@ function setCaption(...parts) {
 
 function deltaNode(d, prev) {
   if (isNil(d)) return null;
-  const arrow = d > 0 ? "▲ " : d < 0 ? "▼ " : "";
-  return el("span", { class: "delta", title: `пред.: ${fmt(prev)}` }, arrow + pf.format(d));
+  const arrow = d > 0 ? el("span", { class: "up" }, "▲ ") : d < 0 ? el("span", { class: "down" }, "▼ ") : null;
+  return el("span", { class: "delta", title: `пред.: ${fmt(prev)}` }, arrow, pf.format(d));
 }
 
 function savePrefs() {
