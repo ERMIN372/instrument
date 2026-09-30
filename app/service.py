@@ -11,6 +11,7 @@ DAY = dt.timedelta(days=1)
 WEEK = dt.timedelta(days=7)
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 LAST_RE = re.compile(r"остат|сальдо|на конец", re.I)
+OPEN_RE = re.compile(r"на начало", re.I)
 
 
 def monday(d: dt.date) -> dt.date:
@@ -45,14 +46,23 @@ def delta(cur, prev):
 
 # ---------- загрузка ----------
 
+def resolve_source(conn, name: str) -> dict | None:
+    """Источник по имени или прежнему имени (без учёта регистра), имя — в приоритете.
+    Сравниваем в Python: lower() в PostgreSQL при локали C не знает кириллицу."""
+    key = name.casefold()
+    rows = conn.execute("SELECT id, name, agg, aliases FROM sources ORDER BY id").fetchall()
+    return next((r for r in rows if r["name"].casefold() == key), None) or next(
+        (r for r in rows if any(a.casefold() == key for a in r["aliases"])), None)
+
+
 def ingest(conn, filename: str, source_name: str, parsed: ParsedFile) -> dict:
     days = parsed.days
     with conn.transaction():
-        src = conn.execute(
+        src = resolve_source(conn, source_name) or conn.execute(
             """INSERT INTO sources (name, agg, position)
                VALUES (%s, %s, (SELECT COALESCE(MAX(position), 0) + 1 FROM sources))
                ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
-               RETURNING id, agg""",
+               RETURNING id, name, agg""",
             (source_name, "last" if LAST_RE.search(source_name) else "sum"),
         ).fetchone()
 
@@ -95,7 +105,7 @@ def ingest(conn, filename: str, source_name: str, parsed: ParsedFile) -> dict:
         )
     return {
         "upload_id": upload_id,
-        "source": source_name,
+        "source": src["name"],
         "date_from": days[0].isoformat(),
         "date_to": days[-1].isoformat(),
         "rows": parsed.rows,
@@ -107,14 +117,23 @@ def ingest(conn, filename: str, source_name: str, parsed: ParsedFile) -> dict:
 
 # ---------- справочники ----------
 
+def close_label(src: dict) -> str:
+    """Заголовок колонки «остаток на конец»: заданный вручную или из имени источника."""
+    if src.get("close_name"):
+        return src["close_name"]
+    name = src["name"]
+    return OPEN_RE.sub("на конец", name) if OPEN_RE.search(name) else f"{name} на конец"
+
+
 def sources(conn) -> list[dict]:
-    return conn.execute(
-        """SELECT s.id, s.name, s.agg, s.position, s.hidden,
+    rows = conn.execute(
+        """SELECT s.id, s.name, s.agg, s.position, s.hidden, s.close_name, s.aliases,
                   MIN(u.date_from) AS date_from, MAX(u.date_to) AS date_to,
                   COUNT(u.id) AS uploads
            FROM sources s LEFT JOIN uploads u ON u.source_id = s.id
            GROUP BY s.id ORDER BY s.position, s.id"""
     ).fetchall()
+    return [{**r, "close_label": close_label(r)} for r in rows]
 
 
 def meta(conn) -> dict:
@@ -131,7 +150,7 @@ def meta(conn) -> dict:
 
 def _load(conn, days: list[dt.date], source_id=None, code=None):
     """(source_id, код) -> {день: qty_base} и source_id -> дни, где у источника есть данные.
-    Дни источника считаются по всем товарам: они нужны агрегации «last»."""
+    Дни источника считаются по всем товарам: по ним видно, есть ли срез остатков на дату."""
     where = "day = ANY(%s)"
     params: list = [days]
     if source_id is not None:
@@ -151,12 +170,11 @@ def _load(conn, days: list[dt.date], source_id=None, code=None):
     return data, source_days
 
 
-def aggregate(agg: str, cells: dict, days: list[dt.date], source_days: set) -> float | None:
-    """sum — сумма по дням периода; last — значение на последний день периода,
-    за который у источника вообще есть данные (срез остатков)."""
+def aggregate(agg: str, cells: dict, days: list[dt.date]) -> float | None:
+    """sum — сумма по дням периода; last — остаток на начало периода: срез на его первый день.
+    Остаток на конец — тот же срез на первый день следующего периода (см. pivot)."""
     if agg == "last":
-        present = [d for d in days if d in source_days]
-        return cells.get(max(present)) if present else None
+        return cells.get(days[0])
     vals = [cells[d] for d in days if d in cells]
     return sum(vals) if vals else None
 
@@ -196,41 +214,62 @@ def _sort(rows: list[dict]) -> list[dict]:
 
 def pivot(conn, mode: str, date: dt.date) -> dict:
     """Сводная: товары × источники за неделю (mode=week) или день (mode=day).
-    Сравнение: с прошлой неделей / с тем же днём прошлой недели."""
+    Сравнение: с прошлой неделей / с тем же днём прошлой недели.
+
+    Источник-остаток даёт две колонки: «на начало» — срез на первый день периода
+    (на своём месте) и «на конец» — срез на первый день следующего периода (в конце
+    таблицы). Неделя 21–27.09: начало — 21.09, конец — 28.09."""
     if mode == "week":
         start = monday(date)
-        days, prev_days = week_days(start), week_days(start - WEEK)
+        days = week_days(start)
         period = {**week_info(start), "compare": "к пред. неделе"}
     else:
-        days, prev_days = [date], [date - WEEK]
+        days = [date]
         period = {**day_info(date), "compare": "к тому же дню пред. недели"}
+    prev_days = [d - WEEK for d in days]
+    after = days[-1] + DAY
 
     srcs = [s for s in sources(conn) if not s["hidden"]]
-    data, source_days = _load(conn, days + prev_days)
+    data, source_days = _load(conn, sorted({*days, *prev_days, after, after - WEEK}))
     items = _items(conn, {code for _, code in data})
     coverage = _coverage(conn, days)
+
+    # (источник, ключ колонки, заголовок, вид, дни периода, дни пред. периода)
+    cols = [
+        (s, str(s["id"]), s["name"], "open", [days[0]], [prev_days[0]]) if s["agg"] == "last"
+        else (s, str(s["id"]), s["name"], "sum", days, prev_days)
+        for s in srcs
+    ] + [
+        (s, f"{s['id']}c", s["close_label"], "close", [after], [after - WEEK])
+        for s in srcs if s["agg"] == "last"
+    ]
 
     rows = []
     for code, item in items.items():
         values, has_any = [], False
-        for s in srcs:
+        for s, _key, _name, _kind, cur_days, old_days in cols:
             cells = data.get((s["id"], code), {})
-            cur = aggregate(s["agg"], cells, days, source_days[s["id"]])
-            prev = aggregate(s["agg"], cells, prev_days, source_days[s["id"]])
+            cur = aggregate(s["agg"], cells, cur_days)
+            prev = aggregate(s["agg"], cells, old_days)
             has_any |= cur is not None or prev is not None
             values.append({"cur": cur, "prev": prev, "delta": delta(cur, prev)})
         if has_any:
             rows.append({**_item_row(item), "values": values})
 
+    columns = []
+    for s, key, name, kind, cur_days, _old in cols:
+        col = {"id": s["id"], "key": key, "name": name, "agg": s["agg"], "kind": kind}
+        if kind == "sum":
+            col.update(covered=coverage.get(s["id"], 0), of=len(days), date=None)
+        else:  # остаток: есть ли у источника срез на нужный день
+            col.update(covered=int(cur_days[0] in source_days[s["id"]]), of=1, date=cur_days[0].isoformat())
+        columns.append(col)
+
     return {
         "mode": mode,
         "period": period,
         "days": [day_info(d) for d in days],
-        "sources": [
-            {"id": s["id"], "name": s["name"], "agg": s["agg"],
-             "covered": coverage.get(s["id"], 0), "of": len(days)}
-            for s in srcs
-        ],
+        "columns": columns,
         "rows": _sort(rows),
     }
 
@@ -246,15 +285,14 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
         return None
     start = monday(date)
     days, prev_days = week_days(start), week_days(start - WEEK)
-    data, source_days = _load(conn, days + prev_days, source_id)
+    data, _ = _load(conn, days + prev_days, source_id)
     items = _items(conn, {code for _, code in data})
-    sd = source_days[source_id]
 
     rows = []
     for code, item in items.items():
         cells = data[(source_id, code)]
-        total = aggregate(src["agg"], cells, days, sd)
-        prev = aggregate(src["agg"], cells, prev_days, sd)
+        total = aggregate(src["agg"], cells, days)
+        prev = aggregate(src["agg"], cells, prev_days)
         if total is None and prev is None:
             continue
         rows.append({
@@ -281,14 +319,13 @@ def trend(conn, end: dt.date, count: int, source_id: int) -> dict | None:
     last = monday(end)
     starts = [last - (count - 1 - i) * WEEK for i in range(count)]
     all_days = [starts[0] + i * DAY for i in range(7 * count)]
-    data, source_days = _load(conn, all_days, source_id)
+    data, _ = _load(conn, all_days, source_id)
     items = _items(conn, {code for _, code in data})
-    sd = source_days[source_id]
 
     rows = []
     for code, item in items.items():
         cells = data[(source_id, code)]
-        values = [aggregate(src["agg"], cells, week_days(s), sd) for s in starts]
+        values = [aggregate(src["agg"], cells, week_days(s)) for s in starts]
         rows.append({**_item_row(item), "values": values, "delta": delta(values[-1], values[-2])})
     return {"weeks": [week_info(s) for s in starts], "source": src, "rows": _sort(rows)}
 
@@ -302,21 +339,20 @@ def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
     days = week_days(start)
     starts = [start - (weeks - 1 - i) * WEEK for i in range(weeks)]
     all_days = [starts[0] + i * DAY for i in range(7 * weeks)]
-    data, source_days = _load(conn, all_days, code=code)
+    data, _ = _load(conn, all_days, code=code)
 
     out = []
     for s in sources(conn):
         if s["hidden"]:
             continue
         cells = data.get((s["id"], code), {})
-        sd = source_days[s["id"]]
         out.append({
             "id": s["id"],
             "name": s["name"],
             "agg": s["agg"],
             "days": [cells.get(d) for d in days],
-            "total": aggregate(s["agg"], cells, days, sd),
-            "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w), sd)} for w in starts],
+            "total": aggregate(s["agg"], cells, days),
+            "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w))} for w in starts],
         })
     return {
         "item": _item_row(item),

@@ -5,7 +5,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const nf = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 const nfCompact = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 });
 const pf = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" });
-const AGG = { sum: "сумма", last: "остаток" };
+const AGG = { sum: "сумма", last: "остаток на начало" };
 const TABLE_TABS = ["pivot", "days", "trend"];
 
 const state = {
@@ -63,6 +63,8 @@ function monday(iso) {
   d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
   return d.toISOString().slice(0, 10);
 }
+
+const ddmm = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
 
 function setCaption(...parts) {
   $("#caption").replaceChildren(...parts.filter((x) => !isNil(x) && x !== false));
@@ -270,17 +272,19 @@ function renderPivot() {
   const data = state.data.pivot;
   if (!data) return;
   renderCategories(data.rows);
-  const partial = data.sources.filter((s) => s.covered < s.of);
+  // Колонки: «сумма» за дни периода или срез остатка на дату (на начало / на конец периода).
+  const partial = data.columns.filter((c) => c.covered < c.of);
+  const gap = (c) => (c.date ? `${c.name} — нет среза на ${ddmm(c.date)}` : `${c.name} — ${c.covered} из ${c.of} дн.`);
   setCaption(
-    `${data.period.label}. Значения в базовых единицах (шт, кг). Δ — ${data.period.compare}. `,
-    partial.length
-      ? el("span", { class: "warn" }, `⚠ Неполные данные: ${partial.map((s) => `${s.name} — ${s.covered} из ${s.of} дн.`).join("; ")}`)
-      : null,
+    `${data.period.label}. Значения в базовых единицах (шт, кг). Остатки — срез на начало периода и на начало следующего. Δ — ${data.period.compare}. `,
+    partial.length ? el("span", { class: "warn" }, `⚠ Неполные данные: ${partial.map(gap).join("; ")}`) : null,
   );
-  const columns = [nameCol, unitCol, ...data.sources.map((s, i) => ({
-    key: `s${s.id}`,
+  const columns = [nameCol, unitCol, ...data.columns.map((s, i) => ({
+    key: `s${s.key}`,
     label: s.name,
-    sub: AGG[s.agg] + (s.covered < s.of ? ` · ${s.covered}/${s.of} дн.` : ""),
+    sub: s.date
+      ? `на ${ddmm(s.date)}${s.covered ? "" : " · нет данных"}`
+      : AGG[s.agg] + (s.covered < s.of ? ` · ${s.covered}/${s.of} дн.` : ""),
     subWarn: s.covered < s.of,
     num: true,
     sep: true,
@@ -601,16 +605,26 @@ async function patchSource(id, body) {
 
 function renderSources() {
   const list = state.meta.sources;
-  const head = el("tr", {}, ...["Порядок", "Название (колонка)", "Как считать период", "Скрыть", "Данные", "Загрузок", ""]
+  const head = el("tr", {}, ...["Порядок", "Название (колонка)", "Как считать период", "Колонка «на конец»", "Скрыть", "Данные", "Загрузок", ""]
     .map((h) => el("th", {}, h)));
   const body = el("tbody", {}, ...list.map((s, i) => el("tr", {},
     el("td", {},
       el("button", { class: "btn small", disabled: i === 0, "aria-label": "Выше", onclick: () => swap(i, i - 1) }, "↑"), " ",
       el("button", { class: "btn small", disabled: i === list.length - 1, "aria-label": "Ниже", onclick: () => swap(i, i + 1) }, "↓")),
-    el("td", {}, el("input", { type: "text", value: s.name, onchange: (e) => patchSource(s.id, { name: e.target.value }) })),
+    el("td", {}, el("input", {
+      type: "text", value: s.name,
+      title: s.aliases.length ? `Файлы с прежними именами тоже идут сюда: ${s.aliases.join(", ")}` : null,
+      onchange: (e) => patchSource(s.id, { name: e.target.value }),
+    })),
     el("td", {}, el("select", { onchange: (e) => patchSource(s.id, { agg: e.target.value }) },
       el("option", { value: "sum", selected: s.agg === "sum" }, "Сумма за период"),
-      el("option", { value: "last", selected: s.agg === "last" }, "Остаток на конец периода"))),
+      el("option", { value: "last", selected: s.agg === "last" }, "Остаток: на начало и на конец периода"))),
+    el("td", {}, s.agg === "last"
+      ? el("input", {
+          type: "text", value: s.close_name || "", placeholder: s.close_label,
+          onchange: (e) => patchSource(s.id, { close_name: e.target.value }),
+        })
+      : el("span", { class: "muted" }, "—")),
     el("td", {}, el("input", { type: "checkbox", checked: s.hidden, onchange: (e) => patchSource(s.id, { hidden: e.target.checked }) })),
     el("td", {}, s.date_from ? `${s.date_from} — ${s.date_to}` : "—"),
     el("td", { class: "num" }, s.uploads),
@@ -623,7 +637,7 @@ function renderSources() {
       },
     }, "Удалить")),
   )));
-  if (!list.length) body.append(el("tr", {}, el("td", { colspan: 7, class: "nil" }, "Источники появятся после первой загрузки")));
+  if (!list.length) body.append(el("tr", {}, el("td", { colspan: 8, class: "nil" }, "Источники появятся после первой загрузки")));
   $("#sources-table").replaceChildren(el("thead", {}, head), body);
 
   async function swap(a, b) {

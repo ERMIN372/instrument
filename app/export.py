@@ -78,11 +78,12 @@ def _pivot_sheet(ws, table: dict, rows: list[dict]):
     period = table["period"]
     ws["A1"] = f"Сводная · {period['label']} · в базовых единицах"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
-    ws["A2"] = f"Δ — {period['compare']}. Источник «остаток» — значение на последний день периода."
+    ws["A2"] = (f"Δ — {period['compare']}. Остаток на начало — срез на первый день периода,"
+                " на конец — на первый день следующего.")
     ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
 
     labels = list(FIXED)
-    for s in table["sources"]:
+    for s in table["columns"]:
         labels += [s["name"], f"{s['name']} · пред.", f"{s['name']} · Δ"]
     _header(ws, 4, labels)
 
@@ -102,7 +103,7 @@ def _pivot_sheet(ws, table: dict, rows: list[dict]):
         r += 1
     last = max(first, r - 1)
 
-    n = len(table["sources"])
+    n = len(table["columns"])
     units = sorted({row["unit"] for row in rows})
     num_cols = [5 + i * 3 + off for i in range(n) for off in (0, 1)]
     pct_cols = {5 + i * 3 + 2: (5 + i * 3, 5 + i * 3 + 1) for i in range(n)}
@@ -114,7 +115,7 @@ def _pivot_sheet(ws, table: dict, rows: list[dict]):
 
 def _days_sheet(ws, table: dict, rows: list[dict]):
     src = table["source"]
-    how = "остаток на последний день" if src["agg"] == "last" else "сумма за неделю"
+    how = "остаток на начало недели (срез на понедельник)" if src["agg"] == "last" else "сумма за неделю"
     ws["A1"] = f"{src['name']} по дням · {table['period']['label']}"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
     ws["A2"] = f"Итого нед. — {how}. В базовых единицах."
