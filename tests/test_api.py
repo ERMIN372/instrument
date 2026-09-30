@@ -198,3 +198,11 @@ def test_rename_migration(client):
     with db.pool.connection() as conn:
         db.rename_sources(conn)
     assert client.get("/api/meta").json()["sources"][0]["name"] == "Прочее"
+
+
+def test_frontend_revalidated_after_deploy(client):
+    r = client.get("/static/app.js")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    assert client.get("/static/app.js", headers={"if-none-match": r.headers["etag"]}).status_code == 304
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assert "cache-control" not in client.get("/api/meta").headers
