@@ -51,6 +51,16 @@ async def basic_auth(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def no_stale_frontend(request: Request, call_next):
+    """Страница и статика — только с проверкой у сервера (ETag → 304), иначе после
+    деплоя браузер берёт старый app.js к новому API."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.exception_handler(HTTPException)
 async def http_error(_request, exc: HTTPException):
     return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
