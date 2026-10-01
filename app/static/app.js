@@ -5,7 +5,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const nf = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 const nfCompact = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 });
 const pf = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" });
-const AGG = { sum: "сумма", last: "остаток на начало" };
+const AGG = { sum: "сумма", last: "остаток на начало", end: "на конец периода" };
 const TABLE_TABS = ["pivot", "days", "trend"];
 
 const state = {
@@ -272,7 +272,7 @@ function renderPivot() {
   const data = state.data.pivot;
   if (!data) return;
   renderCategories(data.rows);
-  // Колонки: «сумма» за дни периода или срез остатка на дату (на начало / на конец периода).
+  // Колонки: «сумма» за дни периода или срез на дату (остаток на начало / на конец, значение на конец периода).
   const partial = data.columns.filter((c) => c.covered < c.of);
   const gap = (c) => (c.date ? `${c.name} — нет среза на ${ddmm(c.date)}` : `${c.name} — ${c.covered} из ${c.of} дн.`);
   setCaption(
@@ -618,7 +618,8 @@ function renderSources() {
     })),
     el("td", {}, el("select", { onchange: (e) => patchSource(s.id, { agg: e.target.value }) },
       el("option", { value: "sum", selected: s.agg === "sum" }, "Сумма за период"),
-      el("option", { value: "last", selected: s.agg === "last" }, "Остаток: на начало и на конец периода"))),
+      el("option", { value: "last", selected: s.agg === "last" }, "Остаток: на начало и на конец периода"),
+      el("option", { value: "end", selected: s.agg === "end" }, "На конец периода (последний день с данными)"))),
     el("td", {}, s.agg === "last"
       ? el("input", {
           type: "text", value: s.close_name || "", placeholder: s.close_label,
