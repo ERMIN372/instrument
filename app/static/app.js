@@ -11,8 +11,9 @@ const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Вып
 
 const state = {
   tab: "pivot",
-  mode: "week",       // сводная: неделя или день
+  mode: "week",       // сводная: неделя, день или произвольный период
   date: null,         // якорная дата (ISO), неделя = неделя этой даты
+  range: null,        // сводная, режим «Период»: { from, to } (ISO, включительно)
   category: "",
   q: "",
   sourceId: null,     // для «По дням» и «Динамики»
@@ -67,6 +68,12 @@ function monday(iso) {
 
 const ddmm = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}`;
 
+function addDays(iso, n) {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
 function setCaption(...parts) {
   $("#caption").replaceChildren(...parts.filter((x) => !isNil(x) && x !== false));
 }
@@ -79,7 +86,7 @@ function deltaNode(d, prev) {
 
 function savePrefs() {
   try {
-    localStorage.setItem("instrument.prefs", JSON.stringify({ tab: state.tab, mode: state.mode, trendCount: state.trendCount }));
+    localStorage.setItem("instrument.prefs", JSON.stringify({ tab: state.tab, mode: state.mode, range: state.range, trendCount: state.trendCount }));
   } catch { /* приватный режим — не критично */ }
 }
 
@@ -130,6 +137,37 @@ function lastDayInWeek(start) {
   return d ? d.date : start;
 }
 
+const isRange = () => state.tab === "pivot" && state.mode === "range";
+const pivotPeriod = () => (isRange() ? { date: state.range.from, date_to: state.range.to } : { date: state.date });
+
+// Период по умолчанию — неделя, на которой стоял пользователь.
+function ensureRange() {
+  if (state.range?.from && state.range?.to) return;
+  const from = monday(state.date || todayIso());
+  state.range = { from, to: addDays(from, 6) };
+}
+
+// Быстрый выбор считаем от последнего дня с данными (не позже сегодня), как и неделю по умолчанию.
+function presetRange(kind) {
+  const today = todayIso();
+  const anchor = state.meta.days.find((d) => d.date <= today)?.date ?? today;
+  const month = `${anchor.slice(0, 7)}-01`;
+  if (kind === "month") return { from: month, to: anchor };
+  if (kind === "prev-month") {
+    const to = addDays(month, -1);
+    return { from: `${to.slice(0, 7)}-01`, to };
+  }
+  if (kind === "28d") return { from: addDays(anchor, -27), to: anchor };
+  if (kind === "ytd") return { from: `${anchor.slice(0, 4)}-01-01`, to: anchor };
+  return null;
+}
+
+function renderRangeForm() {
+  $("#range-from").value = state.range.from;
+  $("#range-to").value = state.range.to;
+  $("#range-preset").value = "";
+}
+
 function renderPeriodSelect() {
   const sel = $("#period-select");
   const opts = periodOptions();
@@ -169,11 +207,16 @@ function renderFilters() {
   if (state.sourceId) srcSel.value = String(state.sourceId);
 
   const mode = state.tab === "pivot" ? state.mode : "week";
+  const range = isRange();
+  if (range) ensureRange();
   $("#export").href = state.tab === "rc"
     ? `api/export-rc.xlsx${qs({ date: state.date, category: state.category, q: state.q })}`
-    : `api/export.xlsx${qs({ mode, date: state.date, category: state.category, q: state.q })}`;
+    : `api/export.xlsx${qs({ mode, ...pivotPeriod(), category: state.category, q: state.q })}`;
   $("#export").hidden = state.tab === "trend";
-  renderPeriodSelect();
+  $("#period-nav").hidden = range;
+  $("#range-form").hidden = !range;
+  if (range) renderRangeForm();
+  else renderPeriodSelect();
 }
 
 function renderCategories(rows) {
@@ -433,7 +476,7 @@ async function load() {
   if (!state.sourceId && state.meta.sources.length) state.sourceId = state.meta.sources[0].id;
   try {
     if (state.tab === "pivot") {
-      state.data.pivot = await api(`api/pivot${qs({ mode: state.mode, date: state.date })}`);
+      state.data.pivot = await api(`api/pivot${qs({ mode: state.mode, ...pivotPeriod() })}`);
     } else if (state.tab === "rc") {
       state.data.rc = await api(`api/rc${qs({ date: state.date })}`);
     } else if (state.tab === "days") {
@@ -463,7 +506,9 @@ function openDetail(code) {
 }
 
 async function loadDetail(scroll = false) {
-  const data = await api(`api/item/${encodeURIComponent(state.detail)}${qs({ date: state.date })}`);
+  // В режиме «Период» карточка — по неделе последнего дня периода.
+  const date = isRange() ? state.range.to : state.date;
+  const data = await api(`api/item/${encodeURIComponent(state.detail)}${qs({ date })}`);
   const panel = $("#detail");
   panel.hidden = false;
   $("#detail-cat").textContent = `${data.item.category} · код ${data.item.code}${data.item.pack ? ` · упак ${data.item.pack} ${data.item.unit}` : ""}`;
@@ -487,7 +532,7 @@ async function loadDetail(scroll = false) {
   if (src) {
     const firstIdx = Math.min(...withData.map((s) => s.weeks.findIndex((w) => !isNil(w.value))));
     drawColumns($("#detail-chart"), src.weeks.slice(Math.min(firstIdx, src.weeks.length - 4)).map((w) => ({
-      key: w.iso.replace(/^\d+-/, ""), value: w.value, tip: w.label, current: w.start === monday(state.date),
+      key: w.iso.replace(/^\d+-/, ""), value: w.value, tip: w.label, current: w.start === monday(date),
     })));
   } else {
     $("#detail-chart").replaceChildren(el("p", { class: "hint" }, "Нет данных за 12 недель"));
@@ -806,6 +851,20 @@ function bind() {
   }
   $("#period-select").addEventListener("change", (e) => {
     state.date = state.tab === "pivot" && state.mode === "day" ? e.target.value : lastDayInWeek(e.target.value);
+    load();
+  });
+  $("#range-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const [from, to] = [$("#range-from").value, $("#range-to").value].sort();  // ISO сортируется как даты
+    state.range = { from, to };
+    savePrefs();
+    load();
+  });
+  $("#range-preset").addEventListener("change", (e) => {
+    const r = presetRange(e.target.value);
+    if (!r) return;
+    state.range = r;
+    savePrefs();
     load();
   });
   $("#period-prev").addEventListener("click", () => stepPeriod(-1));

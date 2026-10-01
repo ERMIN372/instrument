@@ -115,39 +115,50 @@ def _pivot_sheet(ws, table: dict, rows: list[dict]):
 
 def _days_sheet(ws, table: dict, rows: list[dict]):
     src = table["source"]
-    how = {"last": "остаток на начало недели (срез на понедельник)",
-           "end": "на будущий период (срез на понедельник следующей недели)"}.get(src["agg"], "сумма за неделю")
+    week = "iso" in table["period"]  # иначе — произвольный период
+    if week:
+        how = {"last": "остаток на начало недели (срез на понедельник)",
+               "end": "на будущий период (срез на понедельник следующей недели)"}.get(src["agg"], "сумма за неделю")
+        total_h, prev_h, note = "Итого нед.", "Пред. нед.", ""
+    else:
+        how = {"last": "остаток на начало периода (срез на первый день)",
+               "end": "на будущий период (срез на день после конца периода)"}.get(src["agg"], "сумма за период")
+        total_h, prev_h, note = "Итого", "Пред. период", f" Δ — {table['period']['compare']}."
     ws["A1"] = f"{src['name']} по дням · {table['period']['label']}"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
-    ws["A2"] = f"Итого нед. — {how}. В базовых единицах."
+    ws["A2"] = f"{total_h} — {how}. В базовых единицах.{note}"
     ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
 
-    labels = FIXED + [d["short"] for d in table["days"]] + ["Итого нед.", "Пред. нед.", "Δ"]
+    n = len(table["days"])
+    tot_c, prev_c, d_c = 5 + n, 6 + n, 7 + n
+    tot, prv = get_column_letter(tot_c), get_column_letter(prev_c)
+    labels = FIXED + [d["short"] for d in table["days"]] + [total_h, prev_h, "Δ"]
     _header(ws, 4, labels)
     first = r = 5
     for row in rows:
         _fixed_cells(ws, r, row)
         for i, v in enumerate(row["days"]):
             ws.cell(row=r, column=5 + i, value=v).number_format = NUM
-        span = f"E{r}:K{r}"
+        span = f"E{r}:{get_column_letter(4 + n)}{r}"
         total = f'=IF(COUNT({span})=0,"",SUM({span}))' if src["agg"] == "sum" else row["total"]
-        cell = ws.cell(row=r, column=12, value=total)
+        cell = ws.cell(row=r, column=tot_c, value=total)
         cell.font = Font(name=FONT, bold=True)
         cell.number_format = NUM
-        ws.cell(row=r, column=13, value=row["prev"]).number_format = NUM
-        d = ws.cell(row=r, column=14, value=f'=IF(OR(M{r}="",M{r}=0,L{r}=""),"",(L{r}-M{r})/ABS(M{r}))')
+        ws.cell(row=r, column=prev_c, value=row["prev"]).number_format = NUM
+        d = ws.cell(row=r, column=d_c,
+                    value=f'=IF(OR({prv}{r}="",{prv}{r}=0,{tot}{r}=""),"",({tot}{r}-{prv}{r})/ABS({prv}{r}))')
         d.number_format = PCT
-        for c in range(5, 15):
-            if c != 12:
+        for c in range(5, d_c + 1):
+            if c != tot_c:
                 ws.cell(row=r, column=c).font = Font(name=FONT)
         r += 1
     last = max(first, r - 1)
 
     units = sorted({row["unit"] for row in rows})
-    _totals(ws, first, last, units, list(range(5, 14)), {14: (12, 13)})
+    _totals(ws, first, last, units, list(range(5, d_c)), {d_c: (tot_c, prev_c)})
     _widths(ws, len(labels))
     ws.freeze_panes = "E5"
-    ws.auto_filter.ref = f"A4:N{last}"
+    ws.auto_filter.ref = f"A4:{get_column_letter(d_c)}{last}"
 
 
 def rc_workbook(table: dict, category: str | None = None, q: str | None = None) -> bytes:

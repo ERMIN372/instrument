@@ -25,12 +25,25 @@
       <div class="seg" id="mode-toggle" role="group" aria-label="Период">
         <button data-mode="week" aria-pressed="true">Неделя</button>
         <button data-mode="day" aria-pressed="false">День</button>
+        <button data-mode="range" aria-pressed="false">Период</button>
       </div>
-      <div class="periodnav">
+      <div class="periodnav" id="period-nav">
         <button id="period-prev" class="btn icon" aria-label="Назад">‹</button>
         <select id="period-select" aria-label="Период"></select>
         <button id="period-next" class="btn icon" aria-label="Вперёд">›</button>
       </div>
+      <form class="periodnav" id="range-form" hidden>
+        <label class="inline">с <input id="range-from" type="date" required aria-label="Начало периода"></label>
+        <label class="inline">по <input id="range-to" type="date" required aria-label="Конец периода"></label>
+        <button class="btn" type="submit">Показать</button>
+        <select id="range-preset" aria-label="Быстрый выбор периода">
+          <option value="">Быстро…</option>
+          <option value="month">Этот месяц</option>
+          <option value="prev-month">Прошлый месяц</option>
+          <option value="28d">Последние 28 дн.</option>
+          <option value="ytd">С начала года</option>
+        </select>
+      </form>
       <select id="source-select" aria-label="Источник" hidden></select>
       <label id="count-wrap" class="inline" hidden>Недель
         <select id="trend-count">

@@ -35,6 +35,26 @@ def week_info(start: dt.date) -> dict:
     }
 
 
+def date_range(start: dt.date, end: dt.date) -> list[dt.date]:
+    return [start + i * DAY for i in range((end - start).days + 1)]
+
+
+def range_info(start: dt.date, end: dt.date) -> dict:
+    n = (end - start).days + 1
+    return {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "days": n,
+        "label": f"{start:%d.%m.%Y}–{end:%d.%m.%Y} ({n} дн.)",
+    }
+
+
+def range_compare(days: list[dt.date]) -> str:
+    """Подпись сравнения произвольного периода: столько же дней сразу перед ним."""
+    n = len(days)
+    return f"к пред. {n} дн. ({days[0] - n * DAY:%d.%m}–{days[0] - DAY:%d.%m})"
+
+
 def day_info(d: dt.date) -> dict:
     wd = WEEKDAYS[d.weekday()]
     return {"date": d.isoformat(), "label": f"{wd} {d:%d.%m.%Y}", "short": f"{wd} {d:%d.%m}"}
@@ -238,9 +258,11 @@ def _sort(rows: list[dict]) -> list[dict]:
     return sorted(rows, key=lambda r: (r["category"], r["name"]))
 
 
-def pivot(conn, mode: str, date: dt.date) -> dict:
-    """Сводная: товары × источники за неделю (mode=week) или день (mode=day).
-    Сравнение: с прошлой неделей / с тем же днём прошлой недели.
+def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dict:
+    """Сводная: товары × источники за неделю (mode=week), день (mode=day) или
+    произвольный период date…date_to включительно (mode=range).
+    Сравнение: с прошлой неделей / с тем же днём прошлой недели / с таким же
+    числом дней сразу перед периодом (01–10.09 → 22–31.08).
 
     Источник-остаток даёт две колонки: «на начало» — срез на первый день периода
     (на своём месте) и «на конец» — срез на первый день следующего периода (в конце
@@ -249,14 +271,18 @@ def pivot(conn, mode: str, date: dt.date) -> dict:
         start = monday(date)
         days = week_days(start)
         period = {**week_info(start), "compare": "к пред. неделе"}
+    elif mode == "range":
+        days = date_range(date, date_to)
+        period = {**range_info(date, date_to), "compare": range_compare(days)}
     else:
         days = [date]
         period = {**day_info(date), "compare": "к тому же дню пред. недели"}
-    prev_days = [d - WEEK for d in days]
+    shift = len(days) * DAY if mode == "range" else WEEK
+    prev_days = [d - shift for d in days]
     after = days[-1] + DAY
 
     srcs = [s for s in sources(conn) if not s["hidden"]]
-    data, source_days = _load(conn, sorted({*days, *prev_days, after, after - WEEK}))
+    data, source_days = _load(conn, sorted({*days, *prev_days, after, after - shift}))
     items = _items(conn, {code for _, code in data})
     coverage = _coverage(conn, days)
 
@@ -272,7 +298,7 @@ def pivot(conn, mode: str, date: dt.date) -> dict:
         return [(s, str(s["id"]), s["name"], s["agg"], days, prev_days)], []
 
     cols = future_after_next([group(s) for s in srcs]) + [
-        (s, f"{s['id']}c", s["close_label"], "close", [after], [after - WEEK])
+        (s, f"{s['id']}c", s["close_label"], "close", [after], [after - shift])
         for s in srcs if s["agg"] == "last"
     ]
 
@@ -312,13 +338,20 @@ def _source(conn, source_id: int) -> dict | None:
     return conn.execute("SELECT id, name, agg FROM sources WHERE id = %s", (source_id,)).fetchone()
 
 
-def by_days(conn, date: dt.date, source_id: int) -> dict | None:
-    """Один источник: товары × дни недели + итог, прошлая неделя, Δ."""
+def by_days(conn, date: dt.date, source_id: int, date_to: dt.date | None = None) -> dict | None:
+    """Один источник: товары × дни недели + итог, прошлая неделя, Δ.
+    С date_to — дни периода date…date_to, сравнение с таким же числом дней перед ним."""
     src = _source(conn, source_id)
     if not src:
         return None
-    start = monday(date)
-    days, prev_days = week_days(start), week_days(start - WEEK)
+    if date_to is None:
+        start = monday(date)
+        days, prev_days = week_days(start), week_days(start - WEEK)
+        period = week_info(start)
+    else:
+        days = date_range(date, date_to)
+        prev_days = [d - len(days) * DAY for d in days]
+        period = {**range_info(date, date_to), "compare": range_compare(days)}
     data, _ = _load(conn, prev_days + days + [days[-1] + DAY], source_id)  # +день: срез «на конец»
     items = _items(conn, {code for _, code in data})
 
@@ -337,7 +370,7 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
             "delta": delta(total, prev),
         })
     return {
-        "period": week_info(start),
+        "period": period,
         "days": [day_info(d) for d in days],
         "source": src,
         "covered": _coverage(conn, days).get(source_id, 0),

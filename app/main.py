@@ -18,6 +18,8 @@ from .parser import parse_xlsx, source_from_filename
 
 STATIC = Path(__file__).parent / "static"
 MAX_FILE_MB = 50
+MODES = ("week", "day", "range")
+MAX_RANGE_DAYS = 366
 
 
 @asynccontextmanager
@@ -78,6 +80,22 @@ def _date(value: str | None, conn=None) -> dt.date:
             raise HTTPException(400, f"Кривая дата: {value}") from None
     row = conn.execute("SELECT MAX(day) AS d FROM movements").fetchone() if conn else None
     return (row and row["d"]) or dt.date.today()
+
+
+def _period(mode: str, date: str | None, date_to: str | None, conn) -> tuple[dt.date, dt.date | None]:
+    """Дата сводной; для mode=range — обе границы периода, включительно."""
+    if mode not in MODES:
+        raise HTTPException(400, "mode: week | day | range")
+    if mode != "range":
+        return _date(date, conn), None
+    if not date or not date_to:
+        raise HTTPException(400, "Для периода нужны date и date_to")
+    start, end = _date(date), _date(date_to)
+    if end < start:
+        raise HTTPException(400, "Конец периода раньше начала")
+    if (end - start).days + 1 > MAX_RANGE_DAYS:
+        raise HTTPException(400, f"Период длиннее {MAX_RANGE_DAYS} дн.")
+    return start, end
 
 
 def _found(value, what: str):
@@ -214,17 +232,16 @@ def meta():
 
 
 @app.get("/api/pivot")
-def pivot(mode: str = "week", date: str | None = None):
-    if mode not in ("week", "day"):
-        raise HTTPException(400, "mode: week | day")
+def pivot(mode: str = "week", date: str | None = None, date_to: str | None = None):
     with db.pool.connection() as conn:
-        return service.pivot(conn, mode, _date(date, conn))
+        return service.pivot(conn, mode, *_period(mode, date, date_to, conn))
 
 
 @app.get("/api/by-days")
-def by_days(source_id: int, date: str | None = None):
+def by_days(source_id: int, date: str | None = None, date_to: str | None = None):
     with db.pool.connection() as conn:
-        return _found(service.by_days(conn, _date(date, conn), source_id), "источник")
+        start, end = _period("range" if date_to else "week", date, date_to, conn)
+        return _found(service.by_days(conn, start, source_id, end), "источник")
 
 
 @app.get("/api/trend")
@@ -269,16 +286,16 @@ def export_rc_xlsx(date: str | None = None, category: str | None = None, q: str 
 
 
 @app.get("/api/export.xlsx")
-def export_xlsx(mode: str = "week", date: str | None = None, category: str | None = None, q: str | None = None):
-    if mode not in ("week", "day"):
-        raise HTTPException(400, "mode: week | day")
+def export_xlsx(mode: str = "week", date: str | None = None, date_to: str | None = None,
+                category: str | None = None, q: str | None = None):
     with db.pool.connection() as conn:
-        day = _date(date, conn)
-        table = service.pivot(conn, mode, day)
+        day, end = _period(mode, date, date_to, conn)
+        table = service.pivot(conn, mode, day, end)
         ids = dict.fromkeys(c["id"] for c in table["columns"])  # остаток даёт 2 колонки, лист — один
-        days = [service.by_days(conn, day, sid) for sid in ids]
+        days = [service.by_days(conn, day, sid, end) for sid in ids]
     content = export.workbook(table, days, category, q)
-    period = table["period"].get("iso") or table["period"]["date"]
+    p = table["period"]
+    period = p.get("iso") or p.get("date") or f"{p['start']}_{p['end']}"
     return _xlsx(content, f"instrument_{period}.xlsx")
 
 

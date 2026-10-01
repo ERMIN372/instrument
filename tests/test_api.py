@@ -119,6 +119,48 @@ def test_pivot_week_day_and_replace(client):
     assert "002" not in rows  # хлеба больше нет ни в W39, ни в W38 — строка не нужна
 
 
+def test_pivot_range(client):
+    # Выпуск 10/день 14–27.09, остатки — срез на каждый день 14–28.09 (100, 101, …).
+    upload(client, "Выпуск", xlsx([(d, BUN, 10) for d in days(W38, 14)]))
+    upload(client, "Остатки на начало", xlsx([(d, BUN, 100 + i) for i, d in enumerate(days(W38, 15))]))
+
+    # 16–20.09 сравниваем с 11–15.09 (столько же дней перед периодом); выпуск там только 14 и 15.09.
+    p = client.get("/api/pivot", params={"mode": "range", "date": "2026-09-16", "date_to": "2026-09-20"}).json()
+    assert p["period"]["label"] == "16.09.2026–20.09.2026 (5 дн.)"
+    assert p["period"]["compare"] == "к пред. 5 дн. (11.09–15.09)"
+    assert [(c["kind"], c["date"], c["covered"], c["of"]) for c in p["columns"]] == [
+        ("sum", None, 5, 5), ("open", "2026-09-16", 1, 1), ("close", "2026-09-21", 1, 1)]
+    bun = p["rows"][0]["values"]
+    assert bun[0] == {"cur": 50, "prev": 20, "delta": 1.5}
+    assert (bun[1]["cur"], bun[1]["prev"]) == (102, None)  # 16.09; среза на 11.09 нет
+    assert (bun[2]["cur"], bun[2]["prev"]) == (107, 102)   # 21.09 и 16.09
+
+    # Период ровно в неделю Пн–Вс считается как неделя.
+    r = client.get("/api/pivot", params={"mode": "range", "date": "2026-09-21", "date_to": "2026-09-27"}).json()
+    w = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-21"}).json()
+    assert r["rows"] == w["rows"]
+
+    sid = p["columns"][0]["id"]
+    b = client.get("/api/by-days", params={"source_id": sid, "date": "2026-09-16", "date_to": "2026-09-20"}).json()
+    assert b["rows"][0]["days"] == [10] * 5 and b["rows"][0]["total"] == 50 and b["rows"][0]["prev"] == 20
+
+    x = client.get("/api/export.xlsx", params={"mode": "range", "date": "2026-09-16", "date_to": "2026-09-20"})
+    assert x.status_code == 200
+    assert "instrument_2026-09-16_2026-09-20.xlsx" in x.headers["content-disposition"]
+    ws = load_workbook(io.BytesIO(x.content))["По дням · Выпуск"]
+    assert [ws.cell(4, c).value for c in range(9, 13)] == ["Вс 20.09", "Итого", "Пред. период", "Δ"]
+    assert ws["J5"].value == '=IF(COUNT(E5:I5)=0,"",SUM(E5:I5))'
+    assert ws["L5"].value.startswith('=IF(OR(K5=""')
+
+    bad = [{"mode": "range", "date": "2026-09-16"},
+           {"mode": "range", "date": "2026-09-20", "date_to": "2026-09-16"},
+           {"mode": "range", "date": "2025-01-01", "date_to": "2026-09-16"},
+           {"mode": "month", "date": "2026-09-16"}]
+    for params in bad:
+        assert client.get("/api/pivot", params=params).status_code == 400, params
+        assert client.get("/api/export.xlsx", params=params).status_code == 400, params
+
+
 def test_by_days_trend_item_and_export(client):
     upload(client, "Выпуск", xlsx([(d, BUN, i) for i, d in enumerate(days(W38, 14))]))
     sid = client.get("/api/meta").json()["sources"][0]["id"]
