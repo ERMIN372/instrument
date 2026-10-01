@@ -206,3 +206,42 @@ def test_frontend_revalidated_after_deploy(client):
     assert client.get("/static/app.js", headers={"if-none-match": r.headers["etag"]}).status_code == 304
     assert client.get("/").headers["cache-control"] == "no-cache"
     assert "cache-control" not in client.get("/api/meta").headers
+
+
+def test_end_of_period(client):
+    # Заказ склада: булка 10..16 по дням W38, W39 — только Пн–Пт (21..25), хлеб — только в среду W39.
+    upload(client, "Заказ склада", xlsx(
+        [(d, BUN, 10 + i) for i, d in enumerate(days(W38, 7))]
+        + [(d, BUN, 21 + i) for i, d in enumerate(days(W39, 5))]
+        + [(W39 + dt.timedelta(days=2), LOAF, 3)]))
+    from app import db
+
+    # Старая БД: ограничение без end — миграция расширяет его и переводит «Заказ склада» на end.
+    with db.pool.connection() as conn:
+        conn.execute("ALTER TABLE sources DROP CONSTRAINT sources_agg_check")
+        conn.execute("ALTER TABLE sources ADD CONSTRAINT sources_agg_check CHECK (agg IN ('sum', 'last'))")
+        conn.commit()
+        db.add_end_agg(conn)
+    sid = client.get("/api/meta").json()["sources"][0]["id"]
+    assert client.get("/api/meta").json()["sources"][0]["agg"] == "end"
+
+    # Неделя 21–27.09: последний день с данными — пятница 25.09; пред. неделя — воскресенье 20.09.
+    p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-23"}).json()
+    assert [(c["kind"], c["date"], c["covered"]) for c in p["columns"]] == [("end", "2026-09-25", 1)]
+    rows = {r["code"]: r for r in p["rows"]}
+    assert rows["001"]["values"][0] == {"cur": 25, "prev": 16, "delta": (25 - 16) / 16}
+    assert "002" not in rows  # в пятницу хлеба нет — на конец недели пусто, строка не нужна
+
+    b = client.get("/api/by-days", params={"source_id": sid, "date": "2026-09-21"}).json()
+    assert {r["code"]: r["total"] for r in b["rows"]} == {"001": 25}
+    t = client.get("/api/trend", params={"source_id": sid, "end": "2026-09-21", "count": 2}).json()
+    assert {r["code"]: r["values"] for r in t["rows"]}["001"] == [16, 25]
+    x = client.get("/api/export.xlsx", params={"mode": "week", "date": "2026-09-21"})
+    ws = load_workbook(io.BytesIO(x.content))["По дням · Заказ склада"]
+    assert "на конец недели" in ws["A2"].value and ws["L5"].value == 25
+
+    # Ручной выбор не перетирается повторным запуском миграции.
+    assert client.patch(f"/api/sources/{sid}", json={"agg": "sum"}).status_code == 200
+    with db.pool.connection() as conn:
+        db.add_end_agg(conn)
+    assert client.get("/api/meta").json()["sources"][0]["agg"] == "sum"

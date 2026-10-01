@@ -8,8 +8,9 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
     id       serial PRIMARY KEY,
     name     text NOT NULL UNIQUE,
-    -- sum: сумма за период; last: остаток — срез на начало периода и на начало следующего
-    agg      text NOT NULL DEFAULT 'sum' CHECK (agg IN ('sum', 'last')),
+    -- sum: сумма за период; last: остаток — срез на начало периода и на начало следующего;
+    -- end: значение на конец периода — на его последний день с данными
+    agg      text NOT NULL DEFAULT 'sum' CHECK (agg IN ('sum', 'last', 'end')),
     position integer NOT NULL DEFAULT 0,
     hidden   boolean NOT NULL DEFAULT false
 );
@@ -95,8 +96,32 @@ def rename_sources(conn) -> None:
             conn.execute("UPDATE sources SET position = %s WHERE id = %s", (pos, r["id"]))
 
 
+# Источники, которые при появлении режима agg = end (октябрь 2026) переводятся на него.
+END_SOURCES = ["Заказ склада"]
+
+
+def add_end_agg(conn) -> None:
+    """Разрешает agg = end в старой БД и разово переводит на него END_SOURCES.
+    Срабатывает, только пока ограничение не знает end, поэтому ручной выбор
+    во вкладке «Источники» потом не перетирает."""
+    with conn.transaction():
+        row = conn.execute(
+            """SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint
+               WHERE conrelid = 'sources'::regclass AND conname = 'sources_agg_check'"""
+        ).fetchone()
+        if row and "'end'" in row["def"]:
+            return
+        conn.execute("ALTER TABLE sources DROP CONSTRAINT IF EXISTS sources_agg_check")
+        conn.execute("ALTER TABLE sources ADD CONSTRAINT sources_agg_check CHECK (agg IN ('sum', 'last', 'end'))")
+        names = {n.casefold() for n in END_SOURCES}
+        for r in conn.execute("SELECT id, name FROM sources").fetchall():
+            if r["name"].casefold() in names:  # регистр — в Python, см. rename_sources
+                conn.execute("UPDATE sources SET agg = 'end' WHERE id = %s", (r["id"],))
+
+
 def init() -> None:
     pool.open(wait=True, timeout=60)
     with pool.connection() as conn:
         conn.execute(SCHEMA)
         rename_sources(conn)
+        add_end_agg(conn)

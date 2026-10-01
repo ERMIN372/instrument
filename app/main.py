@@ -156,8 +156,8 @@ class SourcePatch(BaseModel):
 @app.patch("/api/sources/{source_id}")
 def patch_source(source_id: int, body: SourcePatch):
     fields = body.model_dump(exclude_unset=True)
-    if "agg" in fields and fields["agg"] not in ("sum", "last"):
-        raise HTTPException(400, "agg: sum | last")
+    if "agg" in fields and fields["agg"] not in ("sum", "last", "end"):
+        raise HTTPException(400, "agg: sum | last | end")
     if "name" in fields:
         fields["name"] = (fields["name"] or "").strip()
         if not fields["name"]:
