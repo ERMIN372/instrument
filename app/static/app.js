@@ -5,7 +5,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const nf = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 const nfCompact = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 });
 const pf = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" });
-const AGG = { sum: "сумма", last: "остаток на начало", end: "на следующий период" };
+const AGG = { sum: "сумма", last: "остаток на начало", end: "на будущий период" };
 const TABLE_TABS = ["pivot", "rc", "days", "trend"];
 const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Выпуск", consumption: "Потребление" };
 
@@ -732,7 +732,7 @@ function renderSources() {
     el("td", {}, el("select", { onchange: (e) => patchSource(s.id, { agg: e.target.value }) },
       el("option", { value: "sum", selected: s.agg === "sum" }, "Сумма за период"),
       el("option", { value: "last", selected: s.agg === "last" }, "Остаток: на начало и на конец периода"),
-      el("option", { value: "end", selected: s.agg === "end" }, "Заказ на следующий период (срез на первый день следующего)"))),
+      el("option", { value: "end", selected: s.agg === "end" }, "Заказ: на текущий и на будущий период (срезы на первый день этого и следующего)"))),
     el("td", {}, s.agg === "last"
       ? el("input", {
           type: "text", value: s.close_name || "", placeholder: s.close_label,
