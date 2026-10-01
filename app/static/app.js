@@ -101,21 +101,32 @@ function currentPeriodValue() {
   return byWeek ? monday(state.date) : state.date;
 }
 
+function todayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 // По умолчанию — последняя «закрытая» неделя: если в самой свежей неделе
 // меньше 7 дней данных, а есть предыдущая, берём предыдущую.
+// «Самая свежая» — не позже сегодня: заказы, план и остатки 1С выгружает и на будущие
+// даты (остатки — до конца месяца), иначе сайт открывался бы на пустой будущей неделе.
 function defaultDate() {
-  const { days, weeks } = state.meta;
+  const { days } = state.meta;
   if (!days.length) return null;
-  const latest = days[0].date;
+  const today = todayIso();
+  const latest = days.find((d) => d.date <= today)?.date ?? days.at(-1).date;  // days — от новых к старым
   const wk = monday(latest);
   const inWeek = days.filter((d) => monday(d.date) === wk).length;
-  if (inWeek < 7 && weeks.length > 1) return lastDayInWeek(weeks[1].start);
+  const prev = state.meta.weeks.find((w) => w.start < wk);
+  if (inWeek < 7 && prev) return lastDayInWeek(prev.start);
   return latest;
 }
 
 // Последний день с данными внутри недели — чтобы переключение в «День» не упиралось в пустой понедельник.
+// Будущие дни (план, заказы, остатки вперёд) пропускаем, если в неделе есть прошедшие.
 function lastDayInWeek(start) {
-  const d = state.meta.days.find((x) => monday(x.date) === start);
+  const inWeek = state.meta.days.filter((x) => monday(x.date) === start);
+  const d = inWeek.find((x) => x.date <= todayIso()) ?? inWeek[0];
   return d ? d.date : start;
 }
 
