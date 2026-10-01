@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS sources (
     id       serial PRIMARY KEY,
     name     text NOT NULL UNIQUE,
     -- sum: сумма за период; last: остаток — срез на начало периода и на начало следующего;
-    -- end: значение на конец периода — на его последний день с данными
+    -- end: значение на конец периода — срез на начало следующего, колонка на своём месте
     agg      text NOT NULL DEFAULT 'sum' CHECK (agg IN ('sum', 'last', 'end')),
     position integer NOT NULL DEFAULT 0,
     hidden   boolean NOT NULL DEFAULT false

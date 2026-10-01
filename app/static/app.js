@@ -619,7 +619,7 @@ function renderSources() {
     el("td", {}, el("select", { onchange: (e) => patchSource(s.id, { agg: e.target.value }) },
       el("option", { value: "sum", selected: s.agg === "sum" }, "Сумма за период"),
       el("option", { value: "last", selected: s.agg === "last" }, "Остаток: на начало и на конец периода"),
-      el("option", { value: "end", selected: s.agg === "end" }, "На конец периода (последний день с данными)"))),
+      el("option", { value: "end", selected: s.agg === "end" }, "На конец периода (срез на начало следующего)"))),
     el("td", {}, s.agg === "last"
       ? el("input", {
           type: "text", value: s.close_name || "", placeholder: s.close_label,

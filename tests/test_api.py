@@ -209,11 +209,9 @@ def test_frontend_revalidated_after_deploy(client):
 
 
 def test_end_of_period(client):
-    # Заказ склада: булка 10..16 по дням W38, W39 — только Пн–Пт (21..25), хлеб — только в среду W39.
+    # Заказ склада: булка 10..24 по дням 14.09–28.09, хлеб — только 21.09 (на конец недели его нет).
     upload(client, "Заказ склада", xlsx(
-        [(d, BUN, 10 + i) for i, d in enumerate(days(W38, 7))]
-        + [(d, BUN, 21 + i) for i, d in enumerate(days(W39, 5))]
-        + [(W39 + dt.timedelta(days=2), LOAF, 3)]))
+        [(d, BUN, 10 + i) for i, d in enumerate(days(W38, 15))] + [(W39, LOAF, 3)]))
     from app import db
 
     # Старая БД: ограничение без end — миграция расширяет его и переводит «Заказ склада» на end.
@@ -225,20 +223,28 @@ def test_end_of_period(client):
     sid = client.get("/api/meta").json()["sources"][0]["id"]
     assert client.get("/api/meta").json()["sources"][0]["agg"] == "end"
 
-    # Неделя 21–27.09: последний день с данными — пятница 25.09; пред. неделя — воскресенье 20.09.
+    # Неделя 21–27.09: одна колонка на своём месте, срез на 28.09; пред. неделя — на 21.09.
     p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-23"}).json()
-    assert [(c["kind"], c["date"], c["covered"]) for c in p["columns"]] == [("end", "2026-09-25", 1)]
+    assert [(c["kind"], c["date"], c["covered"]) for c in p["columns"]] == [("end", "2026-09-28", 1)]
     rows = {r["code"]: r for r in p["rows"]}
-    assert rows["001"]["values"][0] == {"cur": 25, "prev": 16, "delta": (25 - 16) / 16}
-    assert "002" not in rows  # в пятницу хлеба нет — на конец недели пусто, строка не нужна
+    assert rows["001"]["values"][0] == {"cur": 24, "prev": 17, "delta": (24 - 17) / 17}
+    assert rows["002"]["values"][0] == {"cur": None, "prev": 3, "delta": None}
+
+    # День 23.09 → срез на 24.09; неделя 28.09 → среза на 05.10 нет.
+    d = client.get("/api/pivot", params={"mode": "day", "date": "2026-09-23"}).json()
+    assert d["columns"][0]["date"] == "2026-09-24" and d["rows"][0]["values"][0]["cur"] == 20
+    p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-28"}).json()
+    assert (p["columns"][0]["date"], p["columns"][0]["covered"]) == ("2026-10-05", 0)
 
     b = client.get("/api/by-days", params={"source_id": sid, "date": "2026-09-21"}).json()
-    assert {r["code"]: r["total"] for r in b["rows"]} == {"001": 25}
+    assert {r["code"]: (r["total"], r["prev"]) for r in b["rows"]} == {"001": (24, 17), "002": (None, 3)}
     t = client.get("/api/trend", params={"source_id": sid, "end": "2026-09-21", "count": 2}).json()
-    assert {r["code"]: r["values"] for r in t["rows"]}["001"] == [16, 25]
+    assert {r["code"]: r["values"] for r in t["rows"]}["001"] == [17, 24]
+    it = client.get("/api/item/001", params={"date": "2026-09-21"}).json()
+    assert it["sources"][0]["total"] == 24
     x = client.get("/api/export.xlsx", params={"mode": "week", "date": "2026-09-21"})
     ws = load_workbook(io.BytesIO(x.content))["По дням · Заказ склада"]
-    assert "на конец недели" in ws["A2"].value and ws["L5"].value == 25
+    assert "на конец недели" in ws["A2"].value and ws["L5"].value == 24
 
     # Ручной выбор не перетирается повторным запуском миграции.
     assert client.patch(f"/api/sources/{sid}", json={"agg": "sum"}).status_code == 200
