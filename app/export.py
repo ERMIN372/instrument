@@ -116,7 +116,7 @@ def _pivot_sheet(ws, table: dict, rows: list[dict]):
 def _days_sheet(ws, table: dict, rows: list[dict]):
     src = table["source"]
     how = {"last": "остаток на начало недели (срез на понедельник)",
-           "end": "заказы на конец недели: со вторника по понедельник следующей"}.get(src["agg"], "сумма за неделю")
+           "end": "на начало периода (срез на понедельник следующей недели)"}.get(src["agg"], "сумма за неделю")
     ws["A1"] = f"{src['name']} по дням · {table['period']['label']}"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
     ws["A2"] = f"Итого нед. — {how}. В базовых единицах."
@@ -151,7 +151,7 @@ def _days_sheet(ws, table: dict, rows: list[dict]):
 
 
 def rc_workbook(table: dict, category: str | None = None, q: str | None = None) -> bytes:
-    """Вкладка товародвиженца РЦ: остаток ср, заказ и выпуск Чт–Вс, остаток пн, потребление за 3 нед."""
+    """Вкладка товародвиженца РЦ: остаток ср, заказ и выпуск Ср–Вс, остаток пн, потребление за 3 нед."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Товародвиженец РЦ"

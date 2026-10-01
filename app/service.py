@@ -175,33 +175,31 @@ def _load(conn, days: list[dt.date], source_id=None, code=None):
 def aggregate(agg: str, cells: dict, days: list[dt.date]) -> float | None:
     """sum — сумма по дням периода; last — остаток на начало периода: срез на его первый день.
     Остаток на конец — тот же срез на первый день следующего периода (см. pivot).
-    end — заказ склада: сумма заказов, под которые производят этот период, — со 2-го дня
-    периода по 1-й день следующего (неделя 21–27.09 → заказы 22–28.09, день 23.09 → 24.09),
+    end — значение на конец периода: срез на первый день следующего (неделя 21–27.09 → 28.09),
     поэтому вызывающие грузят на день больше периода."""
     if agg == "last":
         return cells.get(days[0])
     if agg == "end":
-        days = end_window(days)
+        return cells.get(days[-1] + DAY)
     vals = [cells[d] for d in days if d in cells]
     return sum(vals) if vals else None
 
 
-def end_window(days: list[dt.date]) -> list[dt.date]:
-    """Дни заказов склада, под которые производят период: со 2-го дня по 1-й день следующего.
-    Проверено на выгрузках сентября 2026: план производства недели совпал с заказами вт–пн
-    точно у 84 из 117 товаро-недель (только пн следующей недели — 71, вся следующая — 74)."""
-    return days[1:] + [days[-1] + DAY]
+def _covered_days(conn, days: list[dt.date]) -> dict[int, set[dt.date]]:
+    """Дни периода, покрытые загруженными файлами каждого источника. Для движений (заказ,
+    выпуск) нет строки в покрытый день — значит, движения не было, а не «нет данных»."""
+    cov: dict[int, set] = defaultdict(set)
+    for r in conn.execute(
+        "SELECT source_id, date_from, date_to FROM uploads WHERE date_to >= %s AND date_from <= %s",
+        (min(days), max(days)),
+    ):
+        cov[r["source_id"]].update(d for d in days if r["date_from"] <= d <= r["date_to"])
+    return cov
 
 
 def _coverage(conn, days: list[dt.date]) -> dict[int, int]:
     """Сколько дней периода покрыто загруженными файлами каждого источника."""
-    cov: dict[int, set] = defaultdict(set)
-    for r in conn.execute(
-        "SELECT source_id, date_from, date_to FROM uploads WHERE date_to >= %s AND date_from <= %s",
-        (days[0], days[-1]),
-    ):
-        cov[r["source_id"]].update(d for d in days if r["date_from"] <= d <= r["date_to"])
-    return {sid: len(ds) for sid, ds in cov.items()}
+    return {sid: len(ds) for sid, ds in _covered_days(conn, days).items()}
 
 
 def _items(conn, codes) -> dict[str, dict]:
@@ -275,12 +273,9 @@ def pivot(conn, mode: str, date: dt.date) -> dict:
         col = {"id": s["id"], "key": key, "name": name, "agg": s["agg"], "kind": kind}
         if kind == "sum":
             col.update(covered=coverage.get(s["id"], 0), of=len(days), date=None)
-        elif kind == "end":  # заказы вт–пн; «нет данных» — если не загружен даже понедельник
-            win = end_window(days)
-            col.update(covered=int(after in source_days[s["id"]]), of=1,
-                       date=after.isoformat(), date_from=win[0].isoformat())
         else:  # срез: есть ли у источника данные на нужный день
-            col.update(covered=int(cur_days[0] in source_days[s["id"]]), of=1, date=cur_days[0].isoformat())
+            day = after if kind == "end" else cur_days[0]
+            col.update(covered=int(day in source_days[s["id"]]), of=1, date=day.isoformat())
         columns.append(col)
 
     return {
@@ -306,9 +301,6 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
     data, _ = _load(conn, prev_days + days + [days[-1] + DAY], source_id)  # +день: срез «на конец»
     items = _items(conn, {code for _, code in data})
 
-    # «На конец периода»: значения дней недели — заказы прошлых периодов, в итог они не входят;
-    # показывать их рядом с итогом — путать (15 960 на пн 14.09 при итоге 11 970 на 21.09).
-    weekly = src["agg"] == "end"
     rows = []
     for code, item in items.items():
         cells = data[(source_id, code)]
@@ -318,7 +310,7 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
             continue
         rows.append({
             **_item_row(item),
-            "days": [None] * 7 if weekly else [cells.get(d) for d in days],
+            "days": [cells.get(d) for d in days],
             "total": total,
             "prev": prev,
             "delta": delta(total, prev),
@@ -327,8 +319,7 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
         "period": week_info(start),
         "days": [day_info(d) for d in days],
         "source": src,
-        "window": [d.isoformat() for d in end_window(days)[::6]] if weekly else None,
-        "covered": 7 if weekly else _coverage(conn, days).get(source_id, 0),
+        "covered": _coverage(conn, days).get(source_id, 0),
         "rows": _sort(rows),
     }
 
@@ -368,13 +359,11 @@ def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
         if s["hidden"]:
             continue
         cells = data.get((s["id"], code), {})
-        weekly = s["agg"] == "end"  # см. by_days: дни недели в итог не входят
         out.append({
             "id": s["id"],
             "name": s["name"],
             "agg": s["agg"],
-            "window": [d.isoformat() for d in end_window(days)[::6]] if weekly else None,
-            "days": [None] * 7 if weekly else [cells.get(d) for d in days],
+            "days": [cells.get(d) for d in days],
             "total": aggregate(s["agg"], cells, days),
             "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w))} for w in starts],
         })
@@ -434,16 +423,16 @@ def calc_stock(start: float | None, orders: list, outputs: list) -> float | None
 
 def rc(conn, date: dt.date) -> dict:
     """Вкладка товародвиженца РЦ по неделе даты: остаток на среду, заказ и выпуск
-    по дням Чт–Вс, остаток на понедельник следующей недели (неделя 21–27.09:
-    остаток 23.09, заказ/выпуск 24–27.09, остаток 28.09), справа — потребление
+    по дням Ср–Вс, остаток на понедельник следующей недели (неделя 21–27.09:
+    остаток 23.09, заказ/выпуск 23–27.09, остаток 28.09), справа — потребление
     по трём предыдущим неделям (31.08–20.09), чтобы сразу прикинуть заказ.
     Остаток на среду — срез из файла; остаток на понедельник — расчёт по формуле,
-    согласованной с РЦ: остаток ср − заказ Чт–Вс + выпуск Чт–Вс (остаток 1С на пн
+    согласованной с РЦ: остаток ср − заказ Ср–Вс + выпуск Ср–Вс (остаток 1С на пн
     не берём: на будущие даты 1С повторяет последний остаток).
     Потребление — свёртка недели по способу источника (обычно сумма)."""
     start = monday(date)
     wed = start + 2 * DAY
-    flow = [wed + i * DAY for i in range(1, 5)]  # Чт–Вс
+    flow = [wed + i * DAY for i in range(5)]  # Ср–Вс: остаток 1С — на начало дня, движение среды тоже в расчёт
     close = start + WEEK                           # Пн следующей недели
     past = [start - (RC_WEEKS - i) * WEEK for i in range(RC_WEEKS)]  # от старой к новой
     roles = rc_settings(conn)
@@ -457,6 +446,7 @@ def rc(conn, date: dt.date) -> dict:
     data, source_days = _load(conn, sorted({wed, *flow, close, start, *(d for w in past for d in week_days(w))}))
     used = {sid for sid in roles.values() if sid}
     items = _items(conn, {code for sid, code in data if sid in used})
+    file_days = _covered_days(conn, flow)
 
     def value(role, day, days, code):
         sid = roles.get(role)
@@ -468,7 +458,8 @@ def rc(conn, date: dt.date) -> dict:
     rows = []
     for code, item in items.items():
         values = [value(role, day, days, code) for role, _, day, days in cols]
-        values[9] = calc_stock(values[0], values[1:5], values[5:9])
+        n = len(flow)
+        values[1 + 2 * n] = calc_stock(values[0], values[1:1 + n], values[1 + n:1 + 2 * n])
         if any(v is not None for v in values):
             rows.append({**_item_row(item), "values": values})
 
@@ -478,7 +469,9 @@ def rc(conn, date: dt.date) -> dict:
         if role == "calc":  # считается, если есть остаток на среду
             sub, covered, of = day_info(day)["short"], columns[0]["covered"], 1
         elif day:
-            sub, covered, of = day_info(day)["short"], int(bool(sid and day in source_days[sid])), 1
+            # остаток — срез: нужен срез на этот день; заказ/выпуск — достаточно, что файл за день загружен
+            seen = source_days if role == "stock" else file_days
+            sub, covered, of = day_info(day)["short"], int(bool(sid and day in seen[sid])), 1
         else:
             sub = f"{days[0]:%d.%m}–{days[-1]:%d.%m}"
             covered, of = (_coverage(conn, days).get(sid, 0) if sid else 0), 7
