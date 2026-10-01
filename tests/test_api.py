@@ -251,3 +251,21 @@ def test_end_of_period(client):
     with db.pool.connection() as conn:
         db.add_end_agg(conn)
     assert client.get("/api/meta").json()["sources"][0]["agg"] == "sum"
+
+
+def test_mail_attachment_lands_in_pivot(client):
+    from email.message import EmailMessage
+
+    from app import mail_import
+
+    msg = EmailMessage()
+    msg["From"] = "robot@firma.ru"
+    msg.set_content("выгрузка")
+    msg.add_attachment(xlsx([(d, BUN, 3) for d in days(W39, 7)]), maintype="application",
+                       subtype="octet-stream", filename="Выпуск_сентябрь_2026.xlsx")
+    res = mail_import.process_message(msg.as_bytes(), ["robot@firma.ru"])
+    assert res[0]["ok"] and res[0]["source"] == "Выпуск"
+
+    p = client.get("/api/pivot", params={"mode": "week", "date": W39.isoformat()}).json()
+    assert [c["name"] for c in p["columns"]] == ["Выпуск"]
+    assert client.get("/api/mail").json()["enabled"] is False

@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
-from . import db, export, service
+from . import db, export, mail_import, service
 from .parser import parse_xlsx, source_from_filename
 
 STATIC = Path(__file__).parent / "static"
@@ -23,7 +23,10 @@ MAX_FILE_MB = 50
 @asynccontextmanager
 async def lifespan(_app):
     db.init()
+    mail_stop = mail_import.start()
     yield
+    if mail_stop:
+        mail_stop.set()
     db.pool.close()
 
 
@@ -113,6 +116,12 @@ async def upload(files: list[UploadFile] = File(...), sources: list[str] = Form(
         except Exception as e:  # noqa: BLE001 — ошибка одного файла не должна валить пачку
             results.append({"file": name, "ok": False, "source": source, "error": str(e)})
     return {"results": results}
+
+
+@app.get("/api/mail")
+def mail_status():
+    """Автозагрузка с почты: включена ли, когда проверяли, что загрузили, последняя ошибка."""
+    return mail_import.status
 
 
 @app.get("/api/source-name")
