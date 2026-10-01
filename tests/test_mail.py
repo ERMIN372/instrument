@@ -51,6 +51,8 @@ def test_stranger_is_ignored():
     raw = _mail("evil@firma.ru.evil.com", {"Выпуск.xlsx": b"x"})
     assert mail_import.process_message(raw, ["@firma.ru", "robot@firma.ru"], ingest) == []
     assert got == []
+    ev = mail_import.events[0]
+    assert ev["kind"] == "skip" and ev["sender"] == "evil@firma.ru.evil.com" and "MAIL_FROM" in ev["reason"]
 
 
 def test_bad_file_is_reported_not_raised(monkeypatch):

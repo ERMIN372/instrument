@@ -180,6 +180,14 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-var
 .result.err { border-color: var(--critical); }
 .result .warn { color: var(--text-secondary); font-size: 12px; }
 
+.mailbox { padding: 4px 16px 12px; margin-bottom: 16px; border-radius: 8px; background: var(--surface-1); border: 1px solid var(--border); }
+.mailbox h2 { margin-top: 12px; }
+.mailbox p { margin: 4px 0; }
+.mailbox .err { color: var(--critical); }
+.mailbox .warn { color: var(--warning); }
+.mailbox .events { margin: 8px 0 0; padding-left: 0; list-style: none; max-height: 220px; overflow-y: auto; font-size: 13px; }
+.mailbox .events li { padding: 2px 0; }
+
 .detail {
   margin-top: 16px; padding: 16px;
   background: var(--surface-1);

@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS movements (
 CREATE INDEX IF NOT EXISTS movements_day_idx ON movements (day);
 CREATE INDEX IF NOT EXISTS movements_upload_idx ON movements (upload_id);
 
+-- Откуда пришёл файл: site — загрузили на сайте, mail — автозагрузка с почты.
+ALTER TABLE uploads ADD COLUMN IF NOT EXISTS via text NOT NULL DEFAULT 'site';
+
 -- Настройки интерфейса, общие для всех пользователей (например, источники вкладки РЦ).
 CREATE TABLE IF NOT EXISTS settings (
     key   text PRIMARY KEY,

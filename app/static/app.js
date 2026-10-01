@@ -101,21 +101,32 @@ function currentPeriodValue() {
   return byWeek ? monday(state.date) : state.date;
 }
 
+function todayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 // По умолчанию — последняя «закрытая» неделя: если в самой свежей неделе
 // меньше 7 дней данных, а есть предыдущая, берём предыдущую.
+// «Самая свежая» — не позже сегодня: заказы, план и остатки 1С выгружает и на будущие
+// даты (остатки — до конца месяца), иначе сайт открывался бы на пустой будущей неделе.
 function defaultDate() {
-  const { days, weeks } = state.meta;
+  const { days } = state.meta;
   if (!days.length) return null;
-  const latest = days[0].date;
+  const today = todayIso();
+  const latest = days.find((d) => d.date <= today)?.date ?? days.at(-1).date;  // days — от новых к старым
   const wk = monday(latest);
   const inWeek = days.filter((d) => monday(d.date) === wk).length;
-  if (inWeek < 7 && weeks.length > 1) return lastDayInWeek(weeks[1].start);
+  const prev = state.meta.weeks.find((w) => w.start < wk);
+  if (inWeek < 7 && prev) return lastDayInWeek(prev.start);
   return latest;
 }
 
 // Последний день с данными внутри недели — чтобы переключение в «День» не упиралось в пустой понедельник.
+// Будущие дни (план, заказы, остатки вперёд) пропускаем, если в неделе есть прошедшие.
 function lastDayInWeek(start) {
-  const d = state.meta.days.find((x) => monday(x.date) === start);
+  const inWeek = state.meta.days.filter((x) => monday(x.date) === start);
+  const d = inWeek.find((x) => x.date <= todayIso()) ?? inWeek[0];
   return d ? d.date : start;
 }
 
@@ -620,12 +631,60 @@ async function submitUpload(e) {
   }
 }
 
+// ---------- автозагрузка с почты ----------
+
+const ddmmyyyy = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}`;
+
+function when(iso) {
+  const d = new Date(iso);
+  const time = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString("ru-RU")} ${time}`;
+}
+
+function ago(iso) {
+  const min = Math.round((Date.now() - new Date(iso)) / 60000);
+  return min < 1 ? "только что" : min < 60 ? `${min} мин назад` : `${Math.floor(min / 60)} ч ${min % 60} мин назад`;
+}
+
+function mailEvent(e) {
+  if (e.kind === "skip") {
+    return el("li", { class: "warn" }, `${when(e.at)} ⚠ Письмо от ${e.sender} «${e.subject}» пропущено: ${e.reason}`);
+  }
+  if (!e.ok) return el("li", { class: "err" }, `${when(e.at)} ✕ ${e.file}: ${e.error}`);
+  return el("li", {}, `${when(e.at)} ✓ `, el("b", {}, e.file), ` → «${e.source}», `,
+    `${ddmmyyyy(e.date_from)}–${ddmmyyyy(e.date_to)}, ${fmt(e.rows)} строк`);
+}
+
+async function loadMail() {
+  const box = $("#mail-status");
+  let m;
+  try { m = await api("api/mail"); } catch { box.hidden = true; return; }
+  box.hidden = false;
+  if (!m.enabled) {
+    box.replaceChildren(el("h2", {}, "Почта"), el("p", { class: m.error ? "err" : "muted" },
+      m.error ? `Автозагрузка выключена: ${m.error}` : "Автозагрузка с почты не настроена (MAIL_HOST в .env)."));
+    return;
+  }
+  const every = Math.round(m.interval / 60);
+  const next = m.checked_at ? new Date(new Date(m.checked_at).getTime() + m.interval * 1000).toISOString() : null;
+  box.replaceChildren(...[
+    el("h2", {}, "Почта"),
+    el("p", {}, `Ящик ${m.mailbox}, проверка каждые ${every} мин. `,
+      m.checked_at ? `Последняя: ${when(m.checked_at)} (${ago(m.checked_at)}), следующая ≈ ${when(next)}.` : "Первая проверка идёт…"),
+    m.error ? el("p", { class: "err" }, `Последняя проверка не удалась: ${m.error}`) : null,
+    m.events.length
+      ? el("ul", { class: "events" }, ...m.events.map(mailEvent))
+      : el("p", { class: "muted" }, "С момента запуска сервиса писем с файлами не было — полная история ниже."),
+  ].filter(Boolean));
+}
+
 async function loadUploads() {
   const rows = await api("api/uploads");
-  const head = el("tr", {}, ...["Файл", "Источник", "Период", "Строк", "Загружен", ""].map((h) => el("th", {}, h)));
+  const head = el("tr", {}, ...["Файл", "Источник", "Откуда", "Период", "Строк", "Загружен", ""].map((h) => el("th", {}, h)));
   const body = el("tbody", {}, ...rows.map((u) => el("tr", {},
     el("td", {}, u.filename),
     el("td", {}, u.source),
+    el("td", {}, u.via === "mail" ? "почта" : "вручную"),
     el("td", {}, `${u.date_from} — ${u.date_to}`),
     el("td", { class: "num" }, fmt(u.rows)),
     el("td", {}, new Date(u.uploaded_at).toLocaleString("ru-RU")),
@@ -638,7 +697,7 @@ async function loadUploads() {
       },
     }, "Удалить")),
   )));
-  if (!rows.length) body.append(el("tr", {}, el("td", { colspan: 6, class: "nil" }, "Пока ничего не загружено")));
+  if (!rows.length) body.append(el("tr", {}, el("td", { colspan: 7, class: "nil" }, "Пока ничего не загружено")));
   $("#uploads-table").replaceChildren(el("thead", {}, head), body);
 }
 
@@ -728,7 +787,7 @@ async function showTab(tab) {
   for (const b of $$(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
   for (const s of $$(".tab")) s.hidden = s.id !== `tab-${tab}`;
   $("#detail").hidden = !state.detail || !TABLE_TABS.includes(tab);
-  if (tab === "upload") { renderFilters(); loadUploads(); return; }
+  if (tab === "upload") { renderFilters(); loadMail(); loadUploads(); return; }
   if (tab === "sources") { renderFilters(); renderSources(); return; }
   load();
 }

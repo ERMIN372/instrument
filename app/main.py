@@ -120,8 +120,8 @@ async def upload(files: list[UploadFile] = File(...), sources: list[str] = Form(
 
 @app.get("/api/mail")
 def mail_status():
-    """Автозагрузка с почты: включена ли, когда проверяли, что загрузили, последняя ошибка."""
-    return mail_import.status
+    """Автозагрузка с почты: включена ли, когда проверяли, последняя ошибка и события."""
+    return mail_import.snapshot()
 
 
 @app.get("/api/source-name")
@@ -137,7 +137,7 @@ def source_name(filename: str):
 def uploads():
     with db.pool.connection() as conn:
         return conn.execute(
-            """SELECT u.id, u.filename, s.name AS source, u.date_from, u.date_to, u.rows, u.uploaded_at
+            """SELECT u.id, u.filename, s.name AS source, u.date_from, u.date_to, u.rows, u.uploaded_at, u.via
                FROM uploads u JOIN sources s ON s.id = u.source_id
                ORDER BY u.uploaded_at DESC"""
         ).fetchall()
