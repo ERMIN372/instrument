@@ -45,7 +45,7 @@ def client(monkeypatch):
     import psycopg
 
     with psycopg.connect(DB_URL, autocommit=True) as conn:
-        conn.execute("DROP TABLE IF EXISTS movements, uploads, items, sources CASCADE")
+        conn.execute("DROP TABLE IF EXISTS movements, uploads, items, sources, settings CASCADE")
 
     import importlib
 
@@ -269,3 +269,41 @@ def test_mail_attachment_lands_in_pivot(client):
     p = client.get("/api/pivot", params={"mode": "week", "date": W39.isoformat()}).json()
     assert [c["name"] for c in p["columns"]] == ["Выпуск"]
     assert client.get("/api/mail").json()["enabled"] is False
+
+
+def test_rc_tab_wed_to_mon(client):
+    # Остаток: на каждый день 21.09–28.09 значение = число месяца; заказ 2/день, выпуск 5/день.
+    upload(client, "Остатки на начало периода", xlsx([(d, BUN, d.day) for d in days(W39, 8)]))
+    upload(client, "Заказ покупателей", xlsx([(d, BUN, 2) for d in days(W39, 7)]))
+    upload(client, "Заказ склада", xlsx([(d, BUN, 100) for d in days(W39, 7)]))
+    upload(client, "Выпуск производства", xlsx([(d, BUN, 5) for d in days(W39, 7)]))
+
+    t = client.get("/api/rc", params={"date": "2026-09-25"}).json()
+    assert {k: v["name"] for k, v in t["roles"].items()} == {
+        "stock": "Остатки на начало периода", "order": "Заказ покупателей", "output": "Выпуск производства"}
+    cols = [(c["role"], c["day"]["date"]) for c in t["columns"]]
+    assert cols == [("stock", "2026-09-23")] \
+        + [("order", f"2026-09-{d}") for d in (24, 25, 26, 27)] \
+        + [("output", f"2026-09-{d}") for d in (24, 25, 26, 27)] + [("stock", "2026-09-28")]
+    assert all(c["covered"] for c in t["columns"])
+    assert t["rows"][0]["values"] == [23, 2, 2, 2, 2, 5, 5, 5, 5, 28]
+    assert t["period"]["label"].startswith("Ср 23.09 → Пн 28.09")
+
+    # Заказ — другой источник, выбор общий и сохраняется.
+    sklad = next(s["id"] for s in client.get("/api/meta").json()["sources"] if s["name"] == "Заказ склада")
+    assert client.put("/api/rc-settings", json={"order": sklad}).json()["order"] == sklad
+    t = client.get("/api/rc", params={"date": "2026-09-25"}).json()
+    assert t["roles"]["order"]["name"] == "Заказ склада"
+    assert t["rows"][0]["values"][1:5] == [100] * 4
+    assert t["roles"]["stock"]["name"] == "Остатки на начало периода"  # остальные роли не сбились
+
+    # Неделя 38: среды 16.09 нет, а срез на пн 21.09 есть — строка только с ним.
+    t = client.get("/api/rc", params={"date": "2026-09-16"}).json()
+    assert t["rows"][0]["values"] == [None] * 9 + [21]
+    assert not t["columns"][0]["covered"] and t["columns"][-1]["covered"]
+
+    r = client.get("/api/export-rc.xlsx", params={"date": "2026-09-25"})
+    ws = load_workbook(io.BytesIO(r.content)).active
+    assert ws.title == "Товародвиженец РЦ"
+    assert ws["E4"].value == "Остаток Ср 23.09" and ws["N4"].value == "Остаток Пн 28.09"
+    assert [ws.cell(row=5, column=c).value for c in range(5, 15)] == [23, 100, 100, 100, 100, 5, 5, 5, 5, 28]

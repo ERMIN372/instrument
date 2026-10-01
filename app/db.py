@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS movements (
 
 CREATE INDEX IF NOT EXISTS movements_day_idx ON movements (day);
 CREATE INDEX IF NOT EXISTS movements_upload_idx ON movements (upload_id);
+
+-- Настройки интерфейса, общие для всех пользователей (например, источники вкладки РЦ).
+CREATE TABLE IF NOT EXISTS settings (
+    key   text PRIMARY KEY,
+    value jsonb NOT NULL
+);
 """
 
 pool = ConnectionPool(

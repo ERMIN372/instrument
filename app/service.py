@@ -5,6 +5,8 @@ import datetime as dt
 import re
 from collections import defaultdict
 
+from psycopg.types.json import Jsonb
+
 from .parser import ParsedFile
 
 DAY = dt.timedelta(days=1)
@@ -364,4 +366,87 @@ def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
         "period": week_info(start),
         "days": [day_info(d) for d in days],
         "sources": out,
+    }
+
+
+# ---------- товародвиженец РЦ ----------
+
+RC_ROLES = {
+    # роль -> (заголовок, как узнать источник по имени, если не выбран вручную)
+    "stock": ("Остаток", re.compile(r"остат", re.I)),
+    "order": ("Заказ", re.compile(r"заказ\w* покуп|заказ", re.I)),
+    "output": ("Выпуск", re.compile(r"выпуск|факт", re.I)),
+}
+
+
+def rc_settings(conn) -> dict[str, int | None]:
+    """Какие источники — остаток, заказ и выпуск. Выбор хранится в settings (общий для всех);
+    не выбран или источник удалён — первый подходящий по имени."""
+    srcs = sources(conn)
+    ids = {s["id"] for s in srcs}
+    row = conn.execute("SELECT value FROM settings WHERE key = 'rc'").fetchone()
+    saved = row["value"] if row else {}
+    out = {}
+    for role, (_label, name_re) in RC_ROLES.items():
+        sid = saved.get(role)
+        if sid not in ids:
+            # «Заказ покупателей» раньше «Заказа склада»: шаблон с покуп ищется первым
+            alts = name_re.pattern.split("|")
+            sid = next((s["id"] for alt in alts for s in srcs if re.search(alt, s["name"], re.I)), None)
+        out[role] = sid
+    return out
+
+
+def save_rc_settings(conn, roles: dict[str, int | None]) -> None:
+    value = {k: v for k, v in roles.items() if k in RC_ROLES}
+    conn.execute(
+        """INSERT INTO settings (key, value) VALUES ('rc', %s)
+           ON CONFLICT (key) DO UPDATE SET value = settings.value || EXCLUDED.value""",
+        (Jsonb(value),),
+    )
+
+
+def rc(conn, date: dt.date) -> dict:
+    """Вкладка товародвиженца РЦ по неделе даты: остаток на среду, заказ и выпуск
+    по дням Чт–Вс, остаток на понедельник следующей недели (неделя 21–27.09:
+    остаток 23.09, заказ/выпуск 24–27.09, остаток 28.09).
+    Остатки — значения источника на день как есть (срез), без пересчёта."""
+    start = monday(date)
+    wed = start + 2 * DAY
+    flow = [wed + i * DAY for i in range(1, 5)]  # Чт–Вс
+    close = start + WEEK                           # Пн следующей недели
+    roles = rc_settings(conn)
+    by_id = {s["id"]: s for s in sources(conn)}
+
+    # (роль, день, заголовок)
+    cols = [("stock", wed, "Остаток")] + [("order", d, "Заказ") for d in flow] \
+        + [("output", d, "Выпуск") for d in flow] + [("stock", close, "Остаток")]
+    data, source_days = _load(conn, [wed, *flow, close])
+    used = {sid for sid in roles.values() if sid}
+    items = _items(conn, {code for sid, code in data if sid in used})
+
+    rows = []
+    for code, item in items.items():
+        values = [data.get((roles[role], code), {}).get(day) if roles[role] else None for role, day, _ in cols]
+        if any(v is not None for v in values):
+            rows.append({**_item_row(item), "values": values})
+
+    columns = []
+    for i, (role, day, label) in enumerate(cols):
+        sid = roles[role]
+        columns.append({
+            "key": f"c{i}",
+            "role": role,
+            "label": label,
+            "day": day_info(day),
+            "covered": bool(sid and day in source_days[sid]),
+        })
+    return {
+        "period": {
+            **week_info(start),
+            "label": f"Ср {wed:%d.%m} → Пн {close:%d.%m.%Y} · нед. {start.isocalendar()[1]}",
+        },
+        "roles": {role: {"id": sid, "name": by_id[sid]["name"]} if sid else None for role, sid in roles.items()},
+        "columns": columns,
+        "rows": _sort(rows),
     }

@@ -6,7 +6,8 @@ const nf = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 const nfCompact = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 });
 const pf = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" });
 const AGG = { sum: "сумма", last: "остаток на начало", end: "на конец периода" };
-const TABLE_TABS = ["pivot", "days", "trend"];
+const TABLE_TABS = ["pivot", "rc", "days", "trend"];
+const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Выпуск" };
 
 const state = {
   tab: "pivot",
@@ -18,7 +19,7 @@ const state = {
   trendCount: 8,
   meta: { sources: [], weeks: [], days: [] },
   data: {},
-  sort: { pivot: {}, days: {}, trend: {} },
+  sort: { pivot: {}, rc: {}, days: {}, trend: {} },
   detail: null,
   detailSource: null,
 };
@@ -148,7 +149,7 @@ function renderFilters() {
   if (!tableTab) return;
   $("#mode-toggle").hidden = state.tab !== "pivot";
   for (const b of $$("#mode-toggle button")) b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode));
-  $("#source-select").hidden = state.tab === "pivot";
+  $("#source-select").hidden = state.tab === "pivot" || state.tab === "rc";
   $("#count-wrap").hidden = state.tab !== "trend";
   $("#trend-count").value = String(state.trendCount);
 
@@ -157,7 +158,9 @@ function renderFilters() {
   if (state.sourceId) srcSel.value = String(state.sourceId);
 
   const mode = state.tab === "pivot" ? state.mode : "week";
-  $("#export").href = `api/export.xlsx${qs({ mode, date: state.date, category: state.category, q: state.q })}`;
+  $("#export").href = state.tab === "rc"
+    ? `api/export-rc.xlsx${qs({ date: state.date, category: state.category, q: state.q })}`
+    : `api/export.xlsx${qs({ mode, date: state.date, category: state.category, q: state.q })}`;
   $("#export").hidden = state.tab === "trend";
   renderPeriodSelect();
 }
@@ -295,6 +298,54 @@ function renderPivot() {
   grid($("#pivot-table"), { columns, rows: filterRows(data.rows), view: "pivot", onRowClick: (r) => openDetail(r.code) });
 }
 
+// ---------- товародвиженец РЦ: остаток ср, заказ и выпуск Чт–Вс, остаток пн ----------
+
+function renderRcRoles(data) {
+  const pick = (role) => el("label", { class: "inline" }, `${RC_ROLES[role]}:`,
+    el("select", {
+      "aria-label": `Источник: ${RC_ROLES[role].toLowerCase()}`,
+      onchange: async (e) => {
+        await api("api/rc-settings", {
+          method: "PUT", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ [role]: e.target.value ? Number(e.target.value) : null }),
+        });
+        load();
+      },
+    },
+    el("option", { value: "", selected: !data.roles[role] }, "— не выбран —"),
+    ...state.meta.sources.map((s) => el("option", { value: s.id, selected: data.roles[role]?.id === s.id }, s.name))));
+  $("#rc-roles").replaceChildren(...Object.keys(RC_ROLES).map(pick),
+    el("span", { class: "muted" }, "Выбор источников общий для всех."));
+}
+
+function renderRc() {
+  const data = state.data.rc;
+  if (!data) return;
+  renderCategories(data.rows);
+  renderRcRoles(data);
+  const missing = data.columns.filter((c) => data.roles[c.role] && !c.covered);
+  const unset = Object.keys(RC_ROLES).filter((r) => !data.roles[r]).map((r) => RC_ROLES[r].toLowerCase());
+  setCaption(
+    `${data.period.label}. Остаток на начало (ср) и на конец (пн) — срез на день, заказ и выпуск — по дням Чт–Вс. В базовых единицах (шт, кг). `,
+    unset.length ? el("span", { class: "warn" }, `⚠ Не выбран источник: ${unset.join(", ")}. `) : null,
+    missing.length ? el("span", { class: "warn" }, `⚠ Нет данных: ${missing.map((c) => `${c.label.toLowerCase()} ${c.day.short}`).join(", ")}`) : null,
+  );
+  const columns = [nameCol, unitCol, ...data.columns.map((c, i) => ({
+    key: c.key,
+    label: c.label,
+    sub: c.day.short + (c.covered ? "" : " · нет данных"),
+    subWarn: !c.covered,
+    num: true,
+    // разделитель — на границе групп: остаток | заказ | выпуск | остаток
+    sep: i === 0 || c.role !== data.columns[i - 1].role,
+    cls: c.role === "stock" ? "strong" : "",
+    get: (r) => r.values[i],
+    render: (r) => fmt(r.values[i]),
+    total: (rows) => fmt(sum(rows.map((r) => r.values[i]))),
+  }))];
+  grid($("#rc-table"), { columns, rows: filterRows(data.rows), view: "rc", onRowClick: (r) => openDetail(r.code) });
+}
+
 // ---------- по дням: один источник, товары × дни недели ----------
 
 function renderDays() {
@@ -354,7 +405,7 @@ function renderTrend() {
 }
 
 function renderCurrent() {
-  ({ pivot: renderPivot, days: renderDays, trend: renderTrend })[state.tab]?.();
+  ({ pivot: renderPivot, rc: renderRc, days: renderDays, trend: renderTrend })[state.tab]?.();
 }
 
 // ---------- загрузка данных вкладок ----------
@@ -364,13 +415,15 @@ async function load() {
   if (!TABLE_TABS.includes(state.tab)) return;
   if (!state.meta.days.length) {
     $("#caption").textContent = "Данных пока нет — загрузи xlsx на вкладке «Загрузка».";
-    for (const t of ["#pivot-table", "#days-table", "#trend-table"]) $(t).replaceChildren();
+    for (const t of ["#pivot-table", "#rc-table", "#days-table", "#trend-table"]) $(t).replaceChildren();
     return;
   }
   if (!state.sourceId && state.meta.sources.length) state.sourceId = state.meta.sources[0].id;
   try {
     if (state.tab === "pivot") {
       state.data.pivot = await api(`api/pivot${qs({ mode: state.mode, date: state.date })}`);
+    } else if (state.tab === "rc") {
+      state.data.rc = await api(`api/rc${qs({ date: state.date })}`);
     } else if (state.tab === "days") {
       state.data.days = await api(`api/by-days${qs({ source_id: state.sourceId, date: state.date })}`);
     } else {
