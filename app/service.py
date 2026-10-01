@@ -295,6 +295,9 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
     data, _ = _load(conn, prev_days + days + [days[-1] + DAY], source_id)  # +день: срез «на конец»
     items = _items(conn, {code for _, code in data})
 
+    # «На конец периода»: значения дней недели — заказы прошлых периодов, в итог они не входят;
+    # показывать их рядом с итогом — путать (15 960 на пн 14.09 при итоге 11 970 на 21.09).
+    weekly = src["agg"] == "end"
     rows = []
     for code, item in items.items():
         cells = data[(source_id, code)]
@@ -304,7 +307,7 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
             continue
         rows.append({
             **_item_row(item),
-            "days": [cells.get(d) for d in days],
+            "days": [None] * 7 if weekly else [cells.get(d) for d in days],
             "total": total,
             "prev": prev,
             "delta": delta(total, prev),
@@ -313,7 +316,8 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
         "period": week_info(start),
         "days": [day_info(d) for d in days],
         "source": src,
-        "covered": _coverage(conn, days).get(source_id, 0),
+        "as_of": (days[-1] + DAY).isoformat() if weekly else None,
+        "covered": 7 if weekly else _coverage(conn, days).get(source_id, 0),
         "rows": _sort(rows),
     }
 
@@ -353,11 +357,13 @@ def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
         if s["hidden"]:
             continue
         cells = data.get((s["id"], code), {})
+        weekly = s["agg"] == "end"  # см. by_days: дни недели в итог не входят
         out.append({
             "id": s["id"],
             "name": s["name"],
             "agg": s["agg"],
-            "days": [cells.get(d) for d in days],
+            "as_of": (days[-1] + DAY).isoformat() if weekly else None,
+            "days": [None] * 7 if weekly else [cells.get(d) for d in days],
             "total": aggregate(s["agg"], cells, days),
             "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w))} for w in starts],
         })
@@ -376,11 +382,13 @@ RC_ROLES = {
     "stock": ("Остаток", re.compile(r"остат", re.I)),
     "order": ("Заказ", re.compile(r"заказ\w* покуп|заказ", re.I)),
     "output": ("Выпуск", re.compile(r"выпуск|факт", re.I)),
+    "consumption": ("Потребление", re.compile(r"отгруз|реализац|продаж|заказ\w* покуп", re.I)),
 }
+RC_WEEKS = 3  # потребление — за столько недель до выбранной
 
 
 def rc_settings(conn) -> dict[str, int | None]:
-    """Какие источники — остаток, заказ и выпуск. Выбор хранится в settings (общий для всех);
+    """Какие источники — остаток, заказ, выпуск и потребление. Выбор хранится в settings (общий для всех);
     не выбран или источник удалён — первый подходящий по имени."""
     srcs = sources(conn)
     ids = {s["id"] for s in srcs}
@@ -409,38 +417,49 @@ def save_rc_settings(conn, roles: dict[str, int | None]) -> None:
 def rc(conn, date: dt.date) -> dict:
     """Вкладка товародвиженца РЦ по неделе даты: остаток на среду, заказ и выпуск
     по дням Чт–Вс, остаток на понедельник следующей недели (неделя 21–27.09:
-    остаток 23.09, заказ/выпуск 24–27.09, остаток 28.09).
-    Остатки — значения источника на день как есть (срез), без пересчёта."""
+    остаток 23.09, заказ/выпуск 24–27.09, остаток 28.09), справа — потребление
+    по трём предыдущим неделям (31.08–20.09), чтобы сразу прикинуть заказ.
+    Остатки — значения источника на день как есть (срез), без пересчёта;
+    потребление — свёртка недели по способу источника (обычно сумма)."""
     start = monday(date)
     wed = start + 2 * DAY
     flow = [wed + i * DAY for i in range(1, 5)]  # Чт–Вс
     close = start + WEEK                           # Пн следующей недели
+    past = [start - (RC_WEEKS - i) * WEEK for i in range(RC_WEEKS)]  # от старой к новой
     roles = rc_settings(conn)
     by_id = {s["id"]: s for s in sources(conn)}
 
-    # (роль, день, заголовок)
-    cols = [("stock", wed, "Остаток")] + [("order", d, "Заказ") for d in flow] \
-        + [("output", d, "Выпуск") for d in flow] + [("stock", close, "Остаток")]
-    data, source_days = _load(conn, [wed, *flow, close])
+    # (роль, заголовок, день или None, дни недели для потребления)
+    cols = [("stock", "Остаток", wed, None)] + [("order", "Заказ", d, None) for d in flow] \
+        + [("output", "Выпуск", d, None) for d in flow] + [("stock", "Остаток", close, None)] \
+        + [("consumption", f"Потребл. нед. {w.isocalendar()[1]}", None, week_days(w)) for w in past]
+    # +start: срез «на конец» последней прошлой недели для источников agg = end
+    data, source_days = _load(conn, sorted({wed, *flow, close, start, *(d for w in past for d in week_days(w))}))
     used = {sid for sid in roles.values() if sid}
     items = _items(conn, {code for sid, code in data if sid in used})
 
+    def value(role, day, days, code):
+        sid = roles[role]
+        if not sid:
+            return None
+        cells = data.get((sid, code), {})
+        return cells.get(day) if day else aggregate(by_id[sid]["agg"], cells, days)
+
     rows = []
     for code, item in items.items():
-        values = [data.get((roles[role], code), {}).get(day) if roles[role] else None for role, day, _ in cols]
+        values = [value(role, day, days, code) for role, _, day, days in cols]
         if any(v is not None for v in values):
             rows.append({**_item_row(item), "values": values})
 
     columns = []
-    for i, (role, day, label) in enumerate(cols):
+    for i, (role, label, day, days) in enumerate(cols):
         sid = roles[role]
-        columns.append({
-            "key": f"c{i}",
-            "role": role,
-            "label": label,
-            "day": day_info(day),
-            "covered": bool(sid and day in source_days[sid]),
-        })
+        if day:
+            sub, covered, of = day_info(day)["short"], int(bool(sid and day in source_days[sid])), 1
+        else:
+            sub = f"{days[0]:%d.%m}–{days[-1]:%d.%m}"
+            covered, of = (_coverage(conn, days).get(sid, 0) if sid else 0), 7
+        columns.append({"key": f"c{i}", "role": role, "label": label, "sub": sub, "covered": covered, "of": of})
     return {
         "period": {
             **week_info(start),
