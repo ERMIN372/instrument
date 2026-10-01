@@ -241,10 +241,10 @@ def test_end_of_period(client):
     t = client.get("/api/trend", params={"source_id": sid, "end": "2026-09-21", "count": 2}).json()
     assert {r["code"]: r["values"] for r in t["rows"]}["001"] == [17, 24]
     it = client.get("/api/item/001", params={"date": "2026-09-21"}).json()
-    assert it["sources"][0]["total"] == 24
+    assert [x["total"] for x in it["sources"]] == [17, 24]  # на начало периода (пн 21.09), на следующий (пн 28.09)
     x = client.get("/api/export.xlsx", params={"mode": "week", "date": "2026-09-21"})
     ws = load_workbook(io.BytesIO(x.content))["По дням · Заказ склада"]
-    assert "на начало периода" in ws["A2"].value and ws["L5"].value == 24
+    assert "на следующий период" in ws["A2"].value and ws["L5"].value == 24
 
     # Ручной выбор не перетирается повторным запуском миграции.
     assert client.patch(f"/api/sources/{sid}", json={"agg": "sum"}).status_code == 200
@@ -347,6 +347,11 @@ def test_weekly_order_card_shows_raw_days(client):
     v = p["rows"][0]["values"]
     assert (v[0]["cur"], v[0]["prev"], v[1]["cur"]) == (11970, 15960, 11970)  # заказ = план недели
 
+    # Карточка: две строки заказа склада — на начало периода (пн 14.09) и на следующий период (пн 21.09).
     card = client.get(f"/api/item/{BUN[0]}", params={"date": "2026-09-16"}).json()
-    order = next(s for s in card["sources"] if s["name"] == "Заказ склада")
-    assert order["days"] == [15960] + [None] * 6 and order["total"] == 11970
+    orders = [s for s in card["sources"] if s["name"] == "Заказ склада"]
+    assert [(s["label"], s["days"], s["total"]) for s in orders] == [
+        ("на начало периода", [15960] + [None] * 6, 15960),
+        ("на следующий период", [None] * 7, 11970),
+    ]
+    assert orders[1]["as_of"] == "2026-09-21" and orders[0]["weeks"] == []

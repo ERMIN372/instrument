@@ -359,11 +359,21 @@ def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
         if s["hidden"]:
             continue
         cells = data.get((s["id"], code), {})
+        if s["agg"] == "end":
+            # Заказ склада — две строки (как просил заказчик): на начало периода — заказ на пн
+            # этой недели (по дням как есть), на следующий период — заказ на пн следующей,
+            # под который производят эту неделю (он же итог в сводной). График — по второй.
+            out.append({
+                "id": s["id"], "name": s["name"], "agg": s["agg"], "label": "на начало периода",
+                "days": [cells.get(d) for d in days], "total": cells.get(days[0]), "weeks": [],
+            })
         out.append({
             "id": s["id"],
             "name": s["name"],
             "agg": s["agg"],
-            "days": [cells.get(d) for d in days],
+            "label": "на следующий период" if s["agg"] == "end" else None,
+            "as_of": (days[-1] + DAY).isoformat() if s["agg"] == "end" else None,
+            "days": [None] * 7 if s["agg"] == "end" else [cells.get(d) for d in days],
             "total": aggregate(s["agg"], cells, days),
             "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w))} for w in starts],
         })
