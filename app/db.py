@@ -128,9 +128,33 @@ def add_end_agg(conn) -> None:
                 conn.execute("UPDATE sources SET agg = 'end' WHERE id = %s", (r["id"],))
 
 
+# Порядок колонок сводной, согласованный с заказчиком (октябрь 2026). Заказ склада даёт две
+# колонки: на текущий период — на своём месте, на будущий — после следующего источника
+# (заказа покупателей), см. service.future_after_next.
+ORDER_2026_10 = ["Остатки на начало периода", "Заказ склада", "Заказ покупателей",
+                 "План производства", "Выпуск производства"]
+
+
+def order_sources(conn) -> None:
+    """Разово выставляет ORDER_2026_10; отметка в settings, поэтому ручной порядок из
+    вкладки «Источники» потом не перетирает. Пока источников из списка нет — ждёт."""
+    with conn.transaction():
+        if conn.execute("SELECT 1 FROM settings WHERE key = 'order_2026_10'").fetchone():
+            return
+        rows = conn.execute("SELECT id, name FROM sources ORDER BY position, id").fetchall()
+        order = [n.casefold() for n in ORDER_2026_10]  # регистр — в Python, см. rename_sources
+        if not any(r["name"].casefold() in order for r in rows):
+            return
+        rows.sort(key=lambda r: order.index(r["name"].casefold()) if r["name"].casefold() in order else len(order))
+        for pos, r in enumerate(rows, 1):
+            conn.execute("UPDATE sources SET position = %s WHERE id = %s", (pos, r["id"]))
+        conn.execute("INSERT INTO settings (key, value) VALUES ('order_2026_10', 'true')")
+
+
 def init() -> None:
     pool.open(wait=True, timeout=60)
     with pool.connection() as conn:
         conn.execute(SCHEMA)
         rename_sources(conn)
         add_end_agg(conn)
+        order_sources(conn)

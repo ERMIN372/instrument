@@ -202,6 +202,20 @@ def _coverage(conn, days: list[dt.date]) -> dict[int, int]:
     return {sid: len(ds) for sid, ds in _covered_days(conn, days).items()}
 
 
+CURRENT, FUTURE = "на текущий период", "на будущий период"
+
+
+def future_after_next(groups: list[tuple[list, list]]) -> list:
+    """Раскладка колонок/строк источников по порядку: (свои, «будущие») для каждого источника.
+    «Будущий» заказ склада встаёт после следующего источника, как договорились с заказчиком:
+    заказ склада на текущий период → заказ покупателей → заказ склада на будущий период."""
+    out, pending = [], []
+    for own, future in groups:
+        out += own + pending
+        pending = list(future)
+    return out + pending
+
+
 def _items(conn, codes) -> dict[str, dict]:
     rows = conn.execute(
         "SELECT code, name, base_unit, pack_size, category FROM items WHERE code = ANY(%s)",
@@ -247,11 +261,17 @@ def pivot(conn, mode: str, date: dt.date) -> dict:
     coverage = _coverage(conn, days)
 
     # (источник, ключ колонки, заголовок, вид, дни периода, дни пред. периода)
-    cols = [
-        (s, str(s["id"]), s["name"], "open", [days[0]], [prev_days[0]]) if s["agg"] == "last"
-        else (s, str(s["id"]), s["name"], s["agg"], days, prev_days)  # sum | end
-        for s in srcs
-    ] + [
+    # Заказ склада (end) — две колонки: на текущий период — срез на первый день периода
+    # (14.09), на будущий — на первый день следующего (21.09), после следующего источника.
+    def group(s):
+        if s["agg"] == "last":
+            return [(s, str(s["id"]), s["name"], "open", [days[0]], [prev_days[0]])], []
+        if s["agg"] == "end":
+            return ([(s, f"{s['id']}t", f"{s['name']} {CURRENT}", "current", [days[0]], [prev_days[0]])],
+                    [(s, str(s["id"]), f"{s['name']} {FUTURE}", "end", days, prev_days)])
+        return [(s, str(s["id"]), s["name"], s["agg"], days, prev_days)], []
+
+    cols = future_after_next([group(s) for s in srcs]) + [
         (s, f"{s['id']}c", s["close_label"], "close", [after], [after - WEEK])
         for s in srcs if s["agg"] == "last"
     ]
@@ -259,10 +279,11 @@ def pivot(conn, mode: str, date: dt.date) -> dict:
     rows = []
     for code, item in items.items():
         values, has_any = [], False
-        for s, _key, _name, _kind, cur_days, old_days in cols:
+        for s, _key, _name, kind, cur_days, old_days in cols:
             cells = data.get((s["id"], code), {})
-            cur = aggregate(s["agg"], cells, cur_days)
-            prev = aggregate(s["agg"], cells, old_days)
+            agg = "last" if kind == "current" else s["agg"]  # текущий заказ — срез на первый день
+            cur = aggregate(agg, cells, cur_days)
+            prev = aggregate(agg, cells, old_days)
             has_any |= cur is not None or prev is not None
             values.append({"cur": cur, "prev": prev, "delta": delta(cur, prev)})
         if has_any:
@@ -354,19 +375,30 @@ def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
     all_days = [starts[0] + i * DAY for i in range(7 * weeks + 1)]  # +день: срез «на конец»
     data, _ = _load(conn, all_days, code=code)
 
-    out = []
+    groups = []
     for s in sources(conn):
         if s["hidden"]:
             continue
         cells = data.get((s["id"], code), {})
-        out.append({
+        row = {
             "id": s["id"],
             "name": s["name"],
             "agg": s["agg"],
+            "label": None,
+            "as_of": None,
             "days": [cells.get(d) for d in days],
             "total": aggregate(s["agg"], cells, days),
             "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w))} for w in starts],
-        })
+        }
+        if s["agg"] != "end":
+            groups.append(([row], []))
+            continue
+        # Заказ склада — как в сводной: на текущий период — заказ на пн этой недели (по дням
+        # как есть), на будущий — на пн следующей, под него производят эту неделю. График — по нему.
+        current = {**row, "label": CURRENT, "total": cells.get(days[0]), "weeks": []}
+        future = {**row, "label": FUTURE, "as_of": (days[-1] + DAY).isoformat(), "days": [None] * 7}
+        groups.append(([current], [future]))
+    out = future_after_next(groups)
     return {
         "item": _item_row(item),
         "period": week_info(start),
