@@ -151,7 +151,7 @@ def _days_sheet(ws, table: dict, rows: list[dict]):
 
 
 def rc_workbook(table: dict, category: str | None = None, q: str | None = None) -> bytes:
-    """Вкладка товародвиженца РЦ: остаток ср, заказ и выпуск Чт–Вс, остаток пн, потребление за 3 нед."""
+    """Вкладка товародвиженца РЦ: остаток ср, заказ и выпуск Ср–Вс, остаток пн, потребление за 3 нед."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Товародвиженец РЦ"

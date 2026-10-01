@@ -309,7 +309,7 @@ function renderPivot() {
   grid($("#pivot-table"), { columns, rows: filterRows(data.rows), view: "pivot", onRowClick: (r) => openDetail(r.code) });
 }
 
-// ---------- товародвиженец РЦ: остаток ср, заказ и выпуск Чт–Вс, остаток пн ----------
+// ---------- товародвиженец РЦ: остаток ср, заказ и выпуск Ср–Вс, остаток пн ----------
 
 function renderRcRoles(data) {
   const pick = (role) => el("label", { class: "inline" }, `${RC_ROLES[role]}:`,
@@ -338,7 +338,7 @@ function renderRc() {
   const gap = (c) => `${c.label.toLowerCase()} ${c.sub}${c.of > 1 ? ` (${c.covered}/${c.of} дн.)` : ""}`;
   const unset = Object.keys(RC_ROLES).filter((r) => !data.roles[r]).map((r) => RC_ROLES[r].toLowerCase());
   setCaption(
-    `${data.period.label}. Остаток ср — из 1С, остаток пн — расчёт: остаток ср − заказ Чт–Вс + выпуск Чт–Вс. Потребление — за 3 прошлые недели. В базовых единицах (шт, кг). `,
+    `${data.period.label}. Остаток ср — из 1С, остаток пн — расчёт: остаток ср − заказ Ср–Вс + выпуск Ср–Вс. Потребление — за 3 прошлые недели. В базовых единицах (шт, кг). `,
     unset.length ? el("span", { class: "warn" }, `⚠ Не выбран источник: ${unset.join(", ")}. `) : null,
     missing.length ? el("span", { class: "warn" }, `⚠ Нет данных: ${missing.map(gap).join(", ")}`) : null,
   );

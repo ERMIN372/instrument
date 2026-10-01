@@ -193,15 +193,21 @@ def end_window(days: list[dt.date]) -> list[dt.date]:
     return days[1:] + [days[-1] + DAY]
 
 
-def _coverage(conn, days: list[dt.date]) -> dict[int, int]:
-    """Сколько дней периода покрыто загруженными файлами каждого источника."""
+def _covered_days(conn, days: list[dt.date]) -> dict[int, set[dt.date]]:
+    """Дни периода, покрытые загруженными файлами каждого источника. Для движений (заказ,
+    выпуск) нет строки в покрытый день — значит, движения не было, а не «нет данных»."""
     cov: dict[int, set] = defaultdict(set)
     for r in conn.execute(
         "SELECT source_id, date_from, date_to FROM uploads WHERE date_to >= %s AND date_from <= %s",
-        (days[0], days[-1]),
+        (min(days), max(days)),
     ):
         cov[r["source_id"]].update(d for d in days if r["date_from"] <= d <= r["date_to"])
-    return {sid: len(ds) for sid, ds in cov.items()}
+    return cov
+
+
+def _coverage(conn, days: list[dt.date]) -> dict[int, int]:
+    """Сколько дней периода покрыто загруженными файлами каждого источника."""
+    return {sid: len(ds) for sid, ds in _covered_days(conn, days).items()}
 
 
 def _items(conn, codes) -> dict[str, dict]:
@@ -434,16 +440,16 @@ def calc_stock(start: float | None, orders: list, outputs: list) -> float | None
 
 def rc(conn, date: dt.date) -> dict:
     """Вкладка товародвиженца РЦ по неделе даты: остаток на среду, заказ и выпуск
-    по дням Чт–Вс, остаток на понедельник следующей недели (неделя 21–27.09:
-    остаток 23.09, заказ/выпуск 24–27.09, остаток 28.09), справа — потребление
+    по дням Ср–Вс, остаток на понедельник следующей недели (неделя 21–27.09:
+    остаток 23.09, заказ/выпуск 23–27.09, остаток 28.09), справа — потребление
     по трём предыдущим неделям (31.08–20.09), чтобы сразу прикинуть заказ.
     Остаток на среду — срез из файла; остаток на понедельник — расчёт по формуле,
-    согласованной с РЦ: остаток ср − заказ Чт–Вс + выпуск Чт–Вс (остаток 1С на пн
+    согласованной с РЦ: остаток ср − заказ Ср–Вс + выпуск Ср–Вс (остаток 1С на пн
     не берём: на будущие даты 1С повторяет последний остаток).
     Потребление — свёртка недели по способу источника (обычно сумма)."""
     start = monday(date)
     wed = start + 2 * DAY
-    flow = [wed + i * DAY for i in range(1, 5)]  # Чт–Вс
+    flow = [wed + i * DAY for i in range(5)]  # Ср–Вс: остаток 1С — на начало дня, движение среды тоже в расчёт
     close = start + WEEK                           # Пн следующей недели
     past = [start - (RC_WEEKS - i) * WEEK for i in range(RC_WEEKS)]  # от старой к новой
     roles = rc_settings(conn)
@@ -457,6 +463,7 @@ def rc(conn, date: dt.date) -> dict:
     data, source_days = _load(conn, sorted({wed, *flow, close, start, *(d for w in past for d in week_days(w))}))
     used = {sid for sid in roles.values() if sid}
     items = _items(conn, {code for sid, code in data if sid in used})
+    file_days = _covered_days(conn, flow)
 
     def value(role, day, days, code):
         sid = roles.get(role)
@@ -468,7 +475,8 @@ def rc(conn, date: dt.date) -> dict:
     rows = []
     for code, item in items.items():
         values = [value(role, day, days, code) for role, _, day, days in cols]
-        values[9] = calc_stock(values[0], values[1:5], values[5:9])
+        n = len(flow)
+        values[1 + 2 * n] = calc_stock(values[0], values[1:1 + n], values[1 + n:1 + 2 * n])
         if any(v is not None for v in values):
             rows.append({**_item_row(item), "values": values})
 
@@ -478,7 +486,9 @@ def rc(conn, date: dt.date) -> dict:
         if role == "calc":  # считается, если есть остаток на среду
             sub, covered, of = day_info(day)["short"], columns[0]["covered"], 1
         elif day:
-            sub, covered, of = day_info(day)["short"], int(bool(sid and day in source_days[sid])), 1
+            # остаток — срез: нужен срез на этот день; заказ/выпуск — достаточно, что файл за день загружен
+            seen = source_days if role == "stock" else file_days
+            sub, covered, of = day_info(day)["short"], int(bool(sid and day in seen[sid])), 1
         else:
             sub = f"{days[0]:%d.%m}–{days[-1]:%d.%m}"
             covered, of = (_coverage(conn, days).get(sid, 0) if sid else 0), 7

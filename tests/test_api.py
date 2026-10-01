@@ -294,14 +294,15 @@ def test_rc_tab_wed_to_mon(client):
         "output": "Выпуск производства", "consumption": "Заказ покупателей"}
     cols = [(c["role"], c["sub"]) for c in t["columns"]]
     assert cols == [("stock", "Ср 23.09")] \
-        + [("order", f"{wd} {d}.09") for wd, d in zip(("Чт", "Пт", "Сб", "Вс"), (24, 25, 26, 27))] \
-        + [("output", f"{wd} {d}.09") for wd, d in zip(("Чт", "Пт", "Сб", "Вс"), (24, 25, 26, 27))] \
+        + [("order", f"{wd} {d}.09") for wd, d in zip(("Ср", "Чт", "Пт", "Сб", "Вс"), (23, 24, 25, 26, 27))] \
+        + [("output", f"{wd} {d}.09") for wd, d in zip(("Ср", "Чт", "Пт", "Сб", "Вс"), (23, 24, 25, 26, 27))] \
         + [("calc", "Пн 28.09"), ("consumption", "31.08–06.09"), ("consumption", "07.09–13.09"),
            ("consumption", "14.09–20.09")]
     assert [c["label"] for c in t["columns"][-3:]] == ["Потребл. нед. 36", "Потребл. нед. 37", "Потребл. нед. 38"]
     assert [(c["covered"], c["of"]) for c in t["columns"][-4:]] == [(1, 1), (2, 7), (7, 7), (7, 7)]
-    # Остаток пн — расчёт, а не срез 1С (28): 23 − 4×2 + 4×5 = 35.
-    assert t["rows"][0]["values"] == [23, 2, 2, 2, 2, 5, 5, 5, 5, 35, 4, 14, 14]
+    # Остаток пн — расчёт, а не срез 1С (28): остаток ср на начало дня, поэтому движение
+    # самой среды тоже входит: 23 − 5×2 + 5×5 = 38.
+    assert t["rows"][0]["values"] == [23, 2, 2, 2, 2, 2, 5, 5, 5, 5, 5, 38, 4, 14, 14]
     assert t["period"]["label"].startswith("Ср 23.09 → Пн 28.09")
 
     # Заказ — другой источник, выбор общий и сохраняется.
@@ -309,21 +310,30 @@ def test_rc_tab_wed_to_mon(client):
     assert client.put("/api/rc-settings", json={"order": sklad}).json()["order"] == sklad
     t = client.get("/api/rc", params={"date": "2026-09-25"}).json()
     assert t["roles"]["order"]["name"] == "Заказ склада"
-    assert t["rows"][0]["values"][1:5] == [100] * 4
-    assert t["rows"][0]["values"][9] == 23 - 400 + 20  # расчёт идёт от выбранного заказа
+    assert t["rows"][0]["values"][1:6] == [100] * 5
+    assert t["rows"][0]["values"][11] == 23 - 500 + 25  # расчёт идёт от выбранного заказа
     assert t["roles"]["consumption"]["name"] == "Заказ покупателей"  # остальные роли не сбились
 
     # Неделя 38: остатка на среду 16.09 нет — расчёт не делаем; потребление — недели 35–37.
     t = client.get("/api/rc", params={"date": "2026-09-16"}).json()
-    assert t["rows"][0]["values"] == [None] * 11 + [4, 14]
-    assert not t["columns"][0]["covered"] and not t["columns"][9]["covered"]
+    assert t["rows"][0]["values"] == [None] * 13 + [4, 14]
+    assert not t["columns"][0]["covered"] and not t["columns"][11]["covered"]
+
+    # Выпуск только 21 и 27.09: в загруженном периоде дни без строк — это ноль, а не «нет данных».
+    upload(client, "Выпуск производства", xlsx([(W39, BUN, 5), (dt.date(2026, 9, 27), BUN, 5)]))
+    t = client.get("/api/rc", params={"date": "2026-09-25"}).json()
+    out = [c for c in t["columns"] if c["role"] == "output"]
+    assert all(c["covered"] for c in out)
+    assert t["rows"][0]["values"][6:11] == [None, None, None, None, 5]
+    upload(client, "Выпуск производства", xlsx([(d, BUN, 5) for d in days(W39, 7)]))
 
     r = client.get("/api/export-rc.xlsx", params={"date": "2026-09-25"})
     ws = load_workbook(io.BytesIO(r.content)).active
     assert ws.title == "Товародвиженец РЦ"
-    assert ws["E4"].value == "Остаток Ср 23.09" and ws["N4"].value == "Остаток расчёт Пн 28.09"
-    assert ws["Q4"].value == "Потребл. нед. 38 14.09–20.09"
-    assert [ws.cell(row=5, column=c).value for c in range(5, 18)] == [23, 100, 100, 100, 100, 5, 5, 5, 5, -357, 4, 14, 14]
+    assert ws["E4"].value == "Остаток Ср 23.09" and ws["F4"].value == "Заказ Ср 23.09"
+    assert ws["P4"].value == "Остаток расчёт Пн 28.09" and ws["S4"].value == "Потребл. нед. 38 14.09–20.09"
+    assert [ws.cell(row=5, column=c).value for c in range(5, 20)] == \
+        [23, 100, 100, 100, 100, 100, 5, 5, 5, 5, 5, 23 - 500 + 25, 4, 14, 14]
 
 
 def test_weekly_order_is_not_split_by_days(client):
