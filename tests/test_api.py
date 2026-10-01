@@ -244,7 +244,7 @@ def test_end_of_period(client):
     assert it["sources"][0]["total"] == 24
     x = client.get("/api/export.xlsx", params={"mode": "week", "date": "2026-09-21"})
     ws = load_workbook(io.BytesIO(x.content))["По дням · Заказ склада"]
-    assert "на конец недели" in ws["A2"].value and ws["L5"].value == 24
+    assert "на начало периода" in ws["A2"].value and ws["L5"].value == 24
 
     # Ручной выбор не перетирается повторным запуском миграции.
     assert client.patch(f"/api/sources/{sid}", json={"agg": "sum"}).status_code == 200
