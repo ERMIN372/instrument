@@ -250,6 +250,7 @@ class RcSettings(BaseModel):
     stock: int | None = None
     order: int | None = None
     output: int | None = None
+    consumption: int | None = None
 
 
 @app.put("/api/rc-settings")

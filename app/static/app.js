@@ -7,7 +7,7 @@ const nfCompact = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumF
 const pf = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" });
 const AGG = { sum: "сумма", last: "остаток на начало", end: "на конец периода" };
 const TABLE_TABS = ["pivot", "rc", "days", "trend"];
-const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Выпуск" };
+const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Выпуск", consumption: "Потребление" };
 
 const state = {
   tab: "pivot",
@@ -334,18 +334,19 @@ function renderRc() {
   if (!data) return;
   renderCategories(data.rows);
   renderRcRoles(data);
-  const missing = data.columns.filter((c) => data.roles[c.role] && !c.covered);
+  const missing = data.columns.filter((c) => data.roles[c.role] && c.covered < c.of);
+  const gap = (c) => `${c.label.toLowerCase()} ${c.sub}${c.of > 1 ? ` (${c.covered}/${c.of} дн.)` : ""}`;
   const unset = Object.keys(RC_ROLES).filter((r) => !data.roles[r]).map((r) => RC_ROLES[r].toLowerCase());
   setCaption(
-    `${data.period.label}. Остаток на начало (ср) и на конец (пн) — срез на день, заказ и выпуск — по дням Чт–Вс. В базовых единицах (шт, кг). `,
+    `${data.period.label}. Остаток на начало (ср) и на конец (пн) — срез на день, заказ и выпуск — по дням Чт–Вс, потребление — за 3 прошлые недели. В базовых единицах (шт, кг). `,
     unset.length ? el("span", { class: "warn" }, `⚠ Не выбран источник: ${unset.join(", ")}. `) : null,
-    missing.length ? el("span", { class: "warn" }, `⚠ Нет данных: ${missing.map((c) => `${c.label.toLowerCase()} ${c.day.short}`).join(", ")}`) : null,
+    missing.length ? el("span", { class: "warn" }, `⚠ Нет данных: ${missing.map(gap).join(", ")}`) : null,
   );
   const columns = [nameCol, unitCol, ...data.columns.map((c, i) => ({
     key: c.key,
     label: c.label,
-    sub: c.day.short + (c.covered ? "" : " · нет данных"),
-    subWarn: !c.covered,
+    sub: c.sub + (c.covered >= c.of ? "" : c.of > 1 ? ` · ${c.covered}/${c.of} дн.` : " · нет данных"),
+    subWarn: c.covered < c.of,
     num: true,
     // разделитель — на границе групп: остаток | заказ | выпуск | остаток
     sep: i === 0 || c.role !== data.columns[i - 1].role,

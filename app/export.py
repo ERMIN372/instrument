@@ -151,7 +151,7 @@ def _days_sheet(ws, table: dict, rows: list[dict]):
 
 
 def rc_workbook(table: dict, category: str | None = None, q: str | None = None) -> bytes:
-    """Вкладка товародвиженца РЦ: остаток ср, заказ и выпуск Чт–Вс, остаток пн."""
+    """Вкладка товародвиженца РЦ: остаток ср, заказ и выпуск Чт–Вс, остаток пн, потребление за 3 нед."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Товародвиженец РЦ"
@@ -159,10 +159,11 @@ def rc_workbook(table: dict, category: str | None = None, q: str | None = None) 
     names = {role: (src or {}).get("name", "не выбран") for role, src in table["roles"].items()}
     ws["A1"] = f"Товародвиженец РЦ · {table['period']['label']} · в базовых единицах"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
-    ws["A2"] = f"Остаток — «{names['stock']}», заказ — «{names['order']}», выпуск — «{names['output']}»."
+    ws["A2"] = (f"Остаток — «{names['stock']}», заказ — «{names['order']}», выпуск — «{names['output']}», "
+                f"потребление по неделям — «{names['consumption']}».")
     ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
 
-    labels = FIXED + [f"{c['label']} {c['day']['short']}" for c in table["columns"]]
+    labels = FIXED + [f"{c['label']} {c['sub']}" for c in table["columns"]]
     _header(ws, 4, labels)
     first = r = 5
     for row in rows:
