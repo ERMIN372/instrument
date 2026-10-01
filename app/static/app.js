@@ -5,7 +5,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const nf = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 const nfCompact = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 });
 const pf = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" });
-const AGG = { sum: "сумма", last: "остаток на начало", end: "на конец периода" };
+const AGG = { sum: "сумма", last: "остаток на начало", end: "заказы вт–пн" };
 const TABLE_TABS = ["pivot", "rc", "days", "trend"];
 const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Выпуск", consumption: "Потребление" };
 
@@ -297,7 +297,7 @@ function renderPivot() {
     key: `s${s.key}`,
     label: s.name,
     sub: s.date
-      ? `на ${ddmm(s.date)}${s.covered ? "" : " · нет данных"}`
+      ? `${s.date_from && s.date_from !== s.date ? `${ddmm(s.date_from)}–` : "на "}${ddmm(s.date)}${s.covered ? "" : " · нет данных"}`
       : AGG[s.agg] + (s.covered < s.of ? ` · ${s.covered}/${s.of} дн.` : ""),
     subWarn: s.covered < s.of,
     num: true,
@@ -334,11 +334,11 @@ function renderRc() {
   if (!data) return;
   renderCategories(data.rows);
   renderRcRoles(data);
-  const missing = data.columns.filter((c) => data.roles[c.role] && c.covered < c.of);
+  const missing = data.columns.filter((c) => c.role !== "calc" && data.roles[c.role] && c.covered < c.of);
   const gap = (c) => `${c.label.toLowerCase()} ${c.sub}${c.of > 1 ? ` (${c.covered}/${c.of} дн.)` : ""}`;
   const unset = Object.keys(RC_ROLES).filter((r) => !data.roles[r]).map((r) => RC_ROLES[r].toLowerCase());
   setCaption(
-    `${data.period.label}. Остаток на начало (ср) и на конец (пн) — срез на день, заказ и выпуск — по дням Чт–Вс, потребление — за 3 прошлые недели. В базовых единицах (шт, кг). `,
+    `${data.period.label}. Остаток ср — из 1С, остаток пн — расчёт: остаток ср − заказ Чт–Вс + выпуск Чт–Вс. Потребление — за 3 прошлые недели. В базовых единицах (шт, кг). `,
     unset.length ? el("span", { class: "warn" }, `⚠ Не выбран источник: ${unset.join(", ")}. `) : null,
     missing.length ? el("span", { class: "warn" }, `⚠ Нет данных: ${missing.map(gap).join(", ")}`) : null,
   );
@@ -350,7 +350,7 @@ function renderRc() {
     num: true,
     // разделитель — на границе групп: остаток | заказ | выпуск | остаток
     sep: i === 0 || c.role !== data.columns[i - 1].role,
-    cls: c.role === "stock" ? "strong" : "",
+    cls: c.role === "stock" || c.role === "calc" ? "strong" : "",
     get: (r) => r.values[i],
     render: (r) => fmt(r.values[i]),
     total: (rows) => fmt(sum(rows.map((r) => r.values[i]))),
@@ -364,8 +364,8 @@ function renderDays() {
   const data = state.data.days;
   if (!data) return;
   renderCategories(data.rows);
-  const cov = data.as_of
-    ? ` Это недельная величина: заказ на ${ddmm(data.as_of)}, под который производят всю эту неделю; по дням не раскладывается.`
+  const cov = data.window
+    ? ` Итог — заказы ${ddmm(data.window[0])}–${ddmm(data.window[1])} (вт–пн), под которые производят эту неделю; по дням не раскладывается.`
     : data.covered < 7 ? el("span", { class: "warn" }, ` ⚠ данные за ${data.covered} из 7 дн.`) : null;
   setCaption(
     `${data.source.name} · ${data.period.label}. «Итого нед.» — ${AGG[data.source.agg]}. Δ — к пред. неделе.`, cov);
@@ -475,9 +475,9 @@ async function loadDetail(scroll = false) {
   const head = el("tr", {}, el("th", {}, "Источник"), ...data.days.map((d) => el("th", {}, d.short)), el("th", { class: "sep" }, "Итого нед."));
   const body = el("tbody", {}, ...data.sources.map((s) => el("tr", {},
     el("td", {}, s.name, el("span", { class: "code" }, AGG[s.agg])),
-    ...(s.as_of
+    ...(s.window
       ? [el("td", { colspan: s.days.length, class: "muted note" },
-          `заказ на ${ddmm(s.as_of)} — под него производят эту неделю, по дням не раскладывается`)]
+          `заказы ${ddmm(s.window[0])}–${ddmm(s.window[1])} (вт–пн) — под них производят эту неделю`)]
       : s.days.map((v) => el("td", { class: `num ${isNil(v) ? "nil" : ""}` }, fmt(v)))),
     el("td", { class: "num strong sep" }, fmt(s.total)),
   )));
@@ -737,7 +737,7 @@ function renderSources() {
     el("td", {}, el("select", { onchange: (e) => patchSource(s.id, { agg: e.target.value }) },
       el("option", { value: "sum", selected: s.agg === "sum" }, "Сумма за период"),
       el("option", { value: "last", selected: s.agg === "last" }, "Остаток: на начало и на конец периода"),
-      el("option", { value: "end", selected: s.agg === "end" }, "На конец периода (срез на начало следующего)"))),
+      el("option", { value: "end", selected: s.agg === "end" }, "Заказы под период: со 2-го дня по 1-й день следующего"))),
     el("td", {}, s.agg === "last"
       ? el("input", {
           type: "text", value: s.close_name || "", placeholder: s.close_label,
