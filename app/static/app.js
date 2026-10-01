@@ -711,9 +711,20 @@ function renderSources() {
 
 // ---------- вкладки и старт ----------
 
+// Данные приходят и в фоне (автозагрузка с почты), поэтому периоды и источники
+// перечитываем при каждом переходе на вкладку и при возврате на страницу.
+async function refreshMeta() {
+  const latest = state.meta.days[0]?.date;
+  const onDefault = state.date === defaultDate();
+  try { await loadMeta(); } catch { return; }  // сеть моргнула — покажем, что было
+  // Пользователь стоял на периоде по умолчанию — переезжает на новый, иначе его выбор не трогаем.
+  if (onDefault && state.meta.days[0]?.date !== latest) state.date = defaultDate();
+}
+
 async function showTab(tab) {
   state.tab = tab;
   savePrefs();
+  await refreshMeta();
   for (const b of $$(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
   for (const s of $$(".tab")) s.hidden = s.id !== `tab-${tab}`;
   $("#detail").hidden = !state.detail || !TABLE_TABS.includes(tab);
@@ -760,6 +771,7 @@ function bind() {
   dz.addEventListener("dragleave", () => dz.classList.remove("over"));
   dz.addEventListener("drop", (e) => { e.preventDefault(); dz.classList.remove("over"); addFiles(e.dataTransfer.files); });
   $("#upload-form").addEventListener("submit", submitUpload);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) showTab(state.tab); });
 }
 
 (async function init() {
