@@ -11,6 +11,7 @@
     <div class="brand">Instrument</div>
     <nav class="tabs" role="tablist">
       <button role="tab" data-tab="pivot" aria-selected="true">Сводная</button>
+      <button role="tab" data-tab="rc">Товародвиженец РЦ</button>
       <button role="tab" data-tab="days">По дням</button>
       <button role="tab" data-tab="trend">Динамика</button>
       <button role="tab" data-tab="upload">Загрузка</button>
@@ -44,6 +45,10 @@
 
     <section id="tab-pivot" class="tab" role="tabpanel">
       <div class="table-wrap"><table id="pivot-table" class="grid"></table></div>
+    </section>
+    <section id="tab-rc" class="tab" role="tabpanel" hidden>
+      <div class="toolbar rc-roles" id="rc-roles"></div>
+      <div class="table-wrap"><table id="rc-table" class="grid"></table></div>
     </section>
     <section id="tab-days" class="tab" role="tabpanel" hidden>
       <div class="table-wrap"><table id="days-table" class="grid"></table></div>

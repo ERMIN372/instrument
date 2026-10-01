@@ -240,6 +240,33 @@ def item(code: str, date: str | None = None):
         return _found(service.item_detail(conn, code, _date(date, conn)), "товар")
 
 
+@app.get("/api/rc")
+def rc(date: str | None = None):
+    with db.pool.connection() as conn:
+        return service.rc(conn, _date(date, conn))
+
+
+class RcSettings(BaseModel):
+    stock: int | None = None
+    order: int | None = None
+    output: int | None = None
+
+
+@app.put("/api/rc-settings")
+def rc_settings(body: RcSettings):
+    """Какие источники вкладка РЦ берёт как остаток, заказ и выпуск (общая настройка)."""
+    with db.pool.connection() as conn:
+        service.save_rc_settings(conn, body.model_dump(exclude_unset=True))
+        return service.rc_settings(conn)
+
+
+@app.get("/api/export-rc.xlsx")
+def export_rc_xlsx(date: str | None = None, category: str | None = None, q: str | None = None):
+    with db.pool.connection() as conn:
+        table = service.rc(conn, _date(date, conn))
+    return _xlsx(export.rc_workbook(table, category, q), f"instrument_rc_{table['period']['iso']}.xlsx")
+
+
 @app.get("/api/export.xlsx")
 def export_xlsx(mode: str = "week", date: str | None = None, category: str | None = None, q: str | None = None):
     if mode not in ("week", "day"):
@@ -251,7 +278,10 @@ def export_xlsx(mode: str = "week", date: str | None = None, category: str | Non
         days = [service.by_days(conn, day, sid) for sid in ids]
     content = export.workbook(table, days, category, q)
     period = table["period"].get("iso") or table["period"]["date"]
-    fname = f"instrument_{period}.xlsx"
+    return _xlsx(content, f"instrument_{period}.xlsx")
+
+
+def _xlsx(content: bytes, fname: str) -> Response:
     return Response(
         content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

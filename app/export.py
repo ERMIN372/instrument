@@ -150,6 +150,39 @@ def _days_sheet(ws, table: dict, rows: list[dict]):
     ws.auto_filter.ref = f"A4:N{last}"
 
 
+def rc_workbook(table: dict, category: str | None = None, q: str | None = None) -> bytes:
+    """Вкладка товародвиженца РЦ: остаток ср, заказ и выпуск Чт–Вс, остаток пн."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Товародвиженец РЦ"
+    rows = filter_rows(table["rows"], category, q)
+    names = {role: (src or {}).get("name", "не выбран") for role, src in table["roles"].items()}
+    ws["A1"] = f"Товародвиженец РЦ · {table['period']['label']} · в базовых единицах"
+    ws["A1"].font = Font(name=FONT, bold=True, size=13)
+    ws["A2"] = f"Остаток — «{names['stock']}», заказ — «{names['order']}», выпуск — «{names['output']}»."
+    ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
+
+    labels = FIXED + [f"{c['label']} {c['day']['short']}" for c in table["columns"]]
+    _header(ws, 4, labels)
+    first = r = 5
+    for row in rows:
+        _fixed_cells(ws, r, row)
+        for i, v in enumerate(row["values"]):
+            cell = ws.cell(row=r, column=5 + i, value=v)
+            cell.font = Font(name=FONT)
+            cell.number_format = NUM
+        r += 1
+    last = max(first, r - 1)
+    _totals(ws, first, last, sorted({row["unit"] for row in rows}), list(range(5, len(labels) + 1)), {})
+    _widths(ws, len(labels))
+    ws.freeze_panes = "E5"
+    ws.auto_filter.ref = f"A4:{get_column_letter(len(labels))}{last}"
+    wb.calculation.fullCalcOnLoad = True
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def workbook(pivot: dict, by_days: list[dict], category: str | None = None, q: str | None = None) -> bytes:
     wb = Workbook()
     used: set = set()
