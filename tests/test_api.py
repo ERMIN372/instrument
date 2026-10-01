@@ -223,13 +223,11 @@ def test_end_of_period(client):
     sid = client.get("/api/meta").json()["sources"][0]["id"]
     assert client.get("/api/meta").json()["sources"][0]["agg"] == "end"
 
-    # Неделя 21–27.09: одна колонка на своём месте, заказы вт 22.09 – пн 28.09 (18+…+24 = 147);
-    # пред. неделя — 15–21.09 (11+…+17 = 98). Хлеб только 21.09 — он в прошлой неделе.
+    # Неделя 21–27.09: одна колонка на своём месте, срез на 28.09; пред. неделя — на 21.09.
     p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-23"}).json()
-    assert [(c["kind"], c["date_from"], c["date"], c["covered"]) for c in p["columns"]] == [
-        ("end", "2026-09-22", "2026-09-28", 1)]
+    assert [(c["kind"], c["date"], c["covered"]) for c in p["columns"]] == [("end", "2026-09-28", 1)]
     rows = {r["code"]: r for r in p["rows"]}
-    assert rows["001"]["values"][0] == {"cur": 147, "prev": 98, "delta": (147 - 98) / 98}
+    assert rows["001"]["values"][0] == {"cur": 24, "prev": 17, "delta": (24 - 17) / 17}
     assert rows["002"]["values"][0] == {"cur": None, "prev": 3, "delta": None}
 
     # День 23.09 → срез на 24.09; неделя 28.09 → среза на 05.10 нет.
@@ -239,14 +237,14 @@ def test_end_of_period(client):
     assert (p["columns"][0]["date"], p["columns"][0]["covered"]) == ("2026-10-05", 0)
 
     b = client.get("/api/by-days", params={"source_id": sid, "date": "2026-09-21"}).json()
-    assert {r["code"]: (r["total"], r["prev"]) for r in b["rows"]} == {"001": (147, 98), "002": (None, 3)}
+    assert {r["code"]: (r["total"], r["prev"]) for r in b["rows"]} == {"001": (24, 17), "002": (None, 3)}
     t = client.get("/api/trend", params={"source_id": sid, "end": "2026-09-21", "count": 2}).json()
-    assert {r["code"]: r["values"] for r in t["rows"]}["001"] == [98, 147]
+    assert {r["code"]: r["values"] for r in t["rows"]}["001"] == [17, 24]
     it = client.get("/api/item/001", params={"date": "2026-09-21"}).json()
-    assert it["sources"][0]["total"] == 147
+    assert it["sources"][0]["total"] == 24
     x = client.get("/api/export.xlsx", params={"mode": "week", "date": "2026-09-21"})
     ws = load_workbook(io.BytesIO(x.content))["По дням · Заказ склада"]
-    assert "на конец недели" in ws["A2"].value and ws["L5"].value == 147
+    assert "на конец недели" in ws["A2"].value and ws["L5"].value == 24
 
     # Ручной выбор не перетирается повторным запуском миграции.
     assert client.patch(f"/api/sources/{sid}", json={"agg": "sum"}).status_code == 200
@@ -336,9 +334,10 @@ def test_rc_tab_wed_to_mon(client):
         [23, 100, 100, 100, 100, 100, 5, 5, 5, 5, 5, 23 - 500 + 25, 4, 14, 14]
 
 
-def test_weekly_order_is_not_split_by_days(client):
+def test_weekly_order_card_shows_raw_days(client):
     """Круассан со скрина: заказ склада на 14.09 (15 960) производили на неделе 07–13.09,
-    на 21.09 (11 970) — на неделе 14–20.09 вместе с планом 11 970."""
+    на 21.09 (11 970) — на неделе 14–20.09 вместе с планом 11 970. Так и показываем
+    (подтверждено заказчиком): итог недели — заказ на пн следующей, в днях — сырые значения."""
     upload(client, "Заказ склада", xlsx([(dt.date(2026, 9, 14), BUN, 15960), (dt.date(2026, 9, 21), BUN, 11970)]))
     upload(client, "План производства", xlsx([(dt.date(2026, 9, 17), BUN, 11970)]))
     sid = client.get("/api/meta").json()["sources"][0]["id"]
@@ -346,14 +345,8 @@ def test_weekly_order_is_not_split_by_days(client):
 
     p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-16"}).json()
     v = p["rows"][0]["values"]
-    assert [c["name"] for c in p["columns"]] == ["Заказ склада", "План производства"]
     assert (v[0]["cur"], v[0]["prev"], v[1]["cur"]) == (11970, 15960, 11970)  # заказ = план недели
 
-    # По дням и в карточке заказ прошлой недели (15 960 на 14.09) рядом с итогом не показываем.
-    b = client.get("/api/by-days", params={"source_id": sid, "date": "2026-09-16"}).json()
-    assert b["rows"][0]["days"] == [None] * 7 and b["rows"][0]["total"] == 11970
-    assert b["window"] == ["2026-09-15", "2026-09-21"]
     card = client.get(f"/api/item/{BUN[0]}", params={"date": "2026-09-16"}).json()
     order = next(s for s in card["sources"] if s["name"] == "Заказ склада")
-    assert order["days"] == [None] * 7 and order["total"] == 11970 and order["window"] == ["2026-09-15", "2026-09-21"]
-    assert next(s for s in card["sources"] if s["name"] == "План производства")["days"][3] == 11970
+    assert order["days"] == [15960] + [None] * 6 and order["total"] == 11970

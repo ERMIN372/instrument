@@ -175,22 +175,14 @@ def _load(conn, days: list[dt.date], source_id=None, code=None):
 def aggregate(agg: str, cells: dict, days: list[dt.date]) -> float | None:
     """sum — сумма по дням периода; last — остаток на начало периода: срез на его первый день.
     Остаток на конец — тот же срез на первый день следующего периода (см. pivot).
-    end — заказ склада: сумма заказов, под которые производят этот период, — со 2-го дня
-    периода по 1-й день следующего (неделя 21–27.09 → заказы 22–28.09, день 23.09 → 24.09),
+    end — значение на конец периода: срез на первый день следующего (неделя 21–27.09 → 28.09),
     поэтому вызывающие грузят на день больше периода."""
     if agg == "last":
         return cells.get(days[0])
     if agg == "end":
-        days = end_window(days)
+        return cells.get(days[-1] + DAY)
     vals = [cells[d] for d in days if d in cells]
     return sum(vals) if vals else None
-
-
-def end_window(days: list[dt.date]) -> list[dt.date]:
-    """Дни заказов склада, под которые производят период: со 2-го дня по 1-й день следующего.
-    Проверено на выгрузках сентября 2026: план производства недели совпал с заказами вт–пн
-    точно у 84 из 117 товаро-недель (только пн следующей недели — 71, вся следующая — 74)."""
-    return days[1:] + [days[-1] + DAY]
 
 
 def _covered_days(conn, days: list[dt.date]) -> dict[int, set[dt.date]]:
@@ -281,12 +273,9 @@ def pivot(conn, mode: str, date: dt.date) -> dict:
         col = {"id": s["id"], "key": key, "name": name, "agg": s["agg"], "kind": kind}
         if kind == "sum":
             col.update(covered=coverage.get(s["id"], 0), of=len(days), date=None)
-        elif kind == "end":  # заказы вт–пн; «нет данных» — если не загружен даже понедельник
-            win = end_window(days)
-            col.update(covered=int(after in source_days[s["id"]]), of=1,
-                       date=after.isoformat(), date_from=win[0].isoformat())
         else:  # срез: есть ли у источника данные на нужный день
-            col.update(covered=int(cur_days[0] in source_days[s["id"]]), of=1, date=cur_days[0].isoformat())
+            day = after if kind == "end" else cur_days[0]
+            col.update(covered=int(day in source_days[s["id"]]), of=1, date=day.isoformat())
         columns.append(col)
 
     return {
@@ -312,9 +301,6 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
     data, _ = _load(conn, prev_days + days + [days[-1] + DAY], source_id)  # +день: срез «на конец»
     items = _items(conn, {code for _, code in data})
 
-    # «На конец периода»: значения дней недели — заказы прошлых периодов, в итог они не входят;
-    # показывать их рядом с итогом — путать (15 960 на пн 14.09 при итоге 11 970 на 21.09).
-    weekly = src["agg"] == "end"
     rows = []
     for code, item in items.items():
         cells = data[(source_id, code)]
@@ -324,7 +310,7 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
             continue
         rows.append({
             **_item_row(item),
-            "days": [None] * 7 if weekly else [cells.get(d) for d in days],
+            "days": [cells.get(d) for d in days],
             "total": total,
             "prev": prev,
             "delta": delta(total, prev),
@@ -333,8 +319,7 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
         "period": week_info(start),
         "days": [day_info(d) for d in days],
         "source": src,
-        "window": [d.isoformat() for d in end_window(days)[::6]] if weekly else None,
-        "covered": 7 if weekly else _coverage(conn, days).get(source_id, 0),
+        "covered": _coverage(conn, days).get(source_id, 0),
         "rows": _sort(rows),
     }
 
@@ -374,13 +359,11 @@ def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
         if s["hidden"]:
             continue
         cells = data.get((s["id"], code), {})
-        weekly = s["agg"] == "end"  # см. by_days: дни недели в итог не входят
         out.append({
             "id": s["id"],
             "name": s["name"],
             "agg": s["agg"],
-            "window": [d.isoformat() for d in end_window(days)[::6]] if weekly else None,
-            "days": [None] * 7 if weekly else [cells.get(d) for d in days],
+            "days": [cells.get(d) for d in days],
             "total": aggregate(s["agg"], cells, days),
             "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w))} for w in starts],
         })
