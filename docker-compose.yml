@@ -24,6 +24,14 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-instrument}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-instrument}
       APP_USER: ${APP_USER:-admin}
       APP_PASSWORD: ${APP_PASSWORD:?APP_PASSWORD is required}
+      # Автозагрузка с почты (см. app/mail_import.py); без MAIL_HOST выключена.
+      MAIL_HOST: ${MAIL_HOST:-}
+      MAIL_PORT: ${MAIL_PORT:-993}
+      MAIL_USER: ${MAIL_USER:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_FOLDER: ${MAIL_FOLDER:-INBOX}
+      MAIL_INTERVAL: ${MAIL_INTERVAL:-600}
     ports:
       - "${APP_PORT:-80}:8000"
 
