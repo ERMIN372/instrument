@@ -631,12 +631,60 @@ async function submitUpload(e) {
   }
 }
 
+// ---------- автозагрузка с почты ----------
+
+const ddmmyyyy = (iso) => `${iso.slice(8, 10)}.${iso.slice(5, 7)}.${iso.slice(0, 4)}`;
+
+function when(iso) {
+  const d = new Date(iso);
+  const time = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString() ? time : `${d.toLocaleDateString("ru-RU")} ${time}`;
+}
+
+function ago(iso) {
+  const min = Math.round((Date.now() - new Date(iso)) / 60000);
+  return min < 1 ? "только что" : min < 60 ? `${min} мин назад` : `${Math.floor(min / 60)} ч ${min % 60} мин назад`;
+}
+
+function mailEvent(e) {
+  if (e.kind === "skip") {
+    return el("li", { class: "warn" }, `${when(e.at)} ⚠ Письмо от ${e.sender} «${e.subject}» пропущено: ${e.reason}`);
+  }
+  if (!e.ok) return el("li", { class: "err" }, `${when(e.at)} ✕ ${e.file}: ${e.error}`);
+  return el("li", {}, `${when(e.at)} ✓ `, el("b", {}, e.file), ` → «${e.source}», `,
+    `${ddmmyyyy(e.date_from)}–${ddmmyyyy(e.date_to)}, ${fmt(e.rows)} строк`);
+}
+
+async function loadMail() {
+  const box = $("#mail-status");
+  let m;
+  try { m = await api("api/mail"); } catch { box.hidden = true; return; }
+  box.hidden = false;
+  if (!m.enabled) {
+    box.replaceChildren(el("h2", {}, "Почта"), el("p", { class: m.error ? "err" : "muted" },
+      m.error ? `Автозагрузка выключена: ${m.error}` : "Автозагрузка с почты не настроена (MAIL_HOST в .env)."));
+    return;
+  }
+  const every = Math.round(m.interval / 60);
+  const next = m.checked_at ? new Date(new Date(m.checked_at).getTime() + m.interval * 1000).toISOString() : null;
+  box.replaceChildren(...[
+    el("h2", {}, "Почта"),
+    el("p", {}, `Ящик ${m.mailbox}, проверка каждые ${every} мин. `,
+      m.checked_at ? `Последняя: ${when(m.checked_at)} (${ago(m.checked_at)}), следующая ≈ ${when(next)}.` : "Первая проверка идёт…"),
+    m.error ? el("p", { class: "err" }, `Последняя проверка не удалась: ${m.error}`) : null,
+    m.events.length
+      ? el("ul", { class: "events" }, ...m.events.map(mailEvent))
+      : el("p", { class: "muted" }, "С момента запуска сервиса писем с файлами не было — полная история ниже."),
+  ].filter(Boolean));
+}
+
 async function loadUploads() {
   const rows = await api("api/uploads");
-  const head = el("tr", {}, ...["Файл", "Источник", "Период", "Строк", "Загружен", ""].map((h) => el("th", {}, h)));
+  const head = el("tr", {}, ...["Файл", "Источник", "Откуда", "Период", "Строк", "Загружен", ""].map((h) => el("th", {}, h)));
   const body = el("tbody", {}, ...rows.map((u) => el("tr", {},
     el("td", {}, u.filename),
     el("td", {}, u.source),
+    el("td", {}, u.via === "mail" ? "почта" : "вручную"),
     el("td", {}, `${u.date_from} — ${u.date_to}`),
     el("td", { class: "num" }, fmt(u.rows)),
     el("td", {}, new Date(u.uploaded_at).toLocaleString("ru-RU")),
@@ -649,7 +697,7 @@ async function loadUploads() {
       },
     }, "Удалить")),
   )));
-  if (!rows.length) body.append(el("tr", {}, el("td", { colspan: 6, class: "nil" }, "Пока ничего не загружено")));
+  if (!rows.length) body.append(el("tr", {}, el("td", { colspan: 7, class: "nil" }, "Пока ничего не загружено")));
   $("#uploads-table").replaceChildren(el("thead", {}, head), body);
 }
 
@@ -739,7 +787,7 @@ async function showTab(tab) {
   for (const b of $$(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
   for (const s of $$(".tab")) s.hidden = s.id !== `tab-${tab}`;
   $("#detail").hidden = !state.detail || !TABLE_TABS.includes(tab);
-  if (tab === "upload") { renderFilters(); loadUploads(); return; }
+  if (tab === "upload") { renderFilters(); loadMail(); loadUploads(); return; }
   if (tab === "sources") { renderFilters(); renderSources(); return; }
   load();
 }

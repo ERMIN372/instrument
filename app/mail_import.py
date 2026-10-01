@@ -24,6 +24,7 @@ import imaplib
 import logging
 import os
 import threading
+from collections import deque
 from email import policy
 from email.message import EmailMessage
 from email.utils import getaddresses
@@ -41,8 +42,23 @@ if not log.handlers:  # uvicorn настраивает только свои л�
     log.setLevel(logging.INFO)
     log.propagate = False
 
-# Для /api/mail: когда последний раз проверяли и чем кончилось.
+# Для /api/mail и блока «Почта» на вкладке «Загрузка»: когда проверяли, чем кончилось
+# и последние события (файл загружен / ошибка файла / письмо пропущено). Живёт до
+# перезапуска сервиса; загруженные файлы остаются и в истории загрузок (via = mail).
 status: dict = {"enabled": False}
+events: deque = deque(maxlen=30)
+
+
+def _now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def _event(**kw) -> None:
+    events.appendleft({"at": _now(), **kw})
+
+
+def snapshot() -> dict:
+    return {**status, "events": list(events)}
 
 
 def config() -> dict | None:
@@ -93,24 +109,28 @@ def ingest_file(name: str, data: bytes) -> dict:
     except Exception as e:  # noqa: BLE001
         return {"file": name, "ok": False, "source": source, "error": str(e)}
     with db.pool.connection() as conn:
-        return {"file": name, "ok": True, **service.ingest(conn, name, source, parsed)}
+        return {"file": name, "ok": True, **service.ingest(conn, name, source, parsed, via="mail")}
 
 
 def process_message(raw: bytes, allowed: list[str], ingest=ingest_file) -> list[dict]:
     msg = email.message_from_bytes(raw, policy=policy.default)
-    who = msg.get("From", "")
+    who, subject = msg.get("From", ""), msg.get("Subject", "")
     if not sender_allowed(msg, allowed):
         log.warning("пропускаю письмо от %s: отправителя нет в MAIL_FROM", who)
+        _event(kind="skip", sender=who, subject=subject, reason="отправителя нет в MAIL_FROM")
         return []
     files = xlsx_attachments(msg)
     if not files:
-        log.info("в письме от %s «%s» нет xlsx", who, msg.get("Subject", ""))
+        log.info("в письме от %s «%s» нет xlsx", who, subject)
+        _event(kind="skip", sender=who, subject=subject, reason="нет вложений .xlsx")
     results = [ingest(name, data) for name, data in files]
     for r in results:
         if r["ok"]:
             log.info("%s → %s, %s–%s, строк %s", r["file"], r["source"], r["date_from"], r["date_to"], r["rows"])
         else:
             log.error("%s: %s", r["file"], r["error"])
+        _event(kind="file", subject=subject, **{k: r.get(k) for k in
+               ("file", "ok", "source", "date_from", "date_to", "rows", "error")})
     return results
 
 
@@ -132,13 +152,11 @@ def poll_once(cfg: dict, ingest=ingest_file) -> list[dict]:
 
 def _loop(cfg: dict, stop: threading.Event) -> None:
     while not stop.is_set():
-        status["checked_at"] = dt.datetime.now().isoformat(timespec="seconds")
+        status["checked_at"] = _now()
         try:
-            results = poll_once(cfg)
-            status["error"] = None
-            if results:
-                status["last_results"] = results
+            if poll_once(cfg):
                 status["loaded_at"] = status["checked_at"]
+            status["error"] = None
         except Exception as e:  # noqa: BLE001 — сеть или БД: повторим в следующий раз
             status["error"] = f"{type(e).__name__}: {e}"
             log.error("проверка почты не удалась: %s", status["error"])

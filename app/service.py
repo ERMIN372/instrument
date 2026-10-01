@@ -57,7 +57,7 @@ def resolve_source(conn, name: str) -> dict | None:
         (r for r in rows if any(a.casefold() == key for a in r["aliases"])), None)
 
 
-def ingest(conn, filename: str, source_name: str, parsed: ParsedFile) -> dict:
+def ingest(conn, filename: str, source_name: str, parsed: ParsedFile, via: str = "site") -> dict:
     days = parsed.days
     with conn.transaction():
         src = resolve_source(conn, source_name) or conn.execute(
@@ -82,9 +82,9 @@ def ingest(conn, filename: str, source_name: str, parsed: ParsedFile) -> dict:
             )
 
         upload_id = conn.execute(
-            """INSERT INTO uploads (source_id, filename, date_from, date_to, rows)
-               VALUES (%s, %s, %s, %s, %s) RETURNING id""",
-            (src["id"], filename, days[0], days[-1], parsed.rows),
+            """INSERT INTO uploads (source_id, filename, date_from, date_to, rows, via)
+               VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+            (src["id"], filename, days[0], days[-1], parsed.rows, via),
         ).fetchone()["id"]
 
         # Новый файл того же источника заменяет его данные за свой период.

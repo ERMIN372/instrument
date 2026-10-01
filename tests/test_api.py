@@ -268,7 +268,14 @@ def test_mail_attachment_lands_in_pivot(client):
 
     p = client.get("/api/pivot", params={"mode": "week", "date": W39.isoformat()}).json()
     assert [c["name"] for c in p["columns"]] == ["Выпуск"]
-    assert client.get("/api/mail").json()["enabled"] is False
+    mail = client.get("/api/mail").json()
+    assert mail["enabled"] is False
+    ev = mail["events"][0]
+    assert ev["kind"] == "file" and ev["ok"] and ev["source"] == "Выпуск" and ev["file"] == "Выпуск_сентябрь_2026.xlsx"
+
+    upload(client, "Выпуск", xlsx([(d, BUN, 4) for d in days(W38, 7)]), name="руками.xlsx")
+    via = {u["filename"]: u["via"] for u in client.get("/api/uploads").json()}
+    assert via == {"Выпуск_сентябрь_2026.xlsx": "mail", "руками.xlsx": "site"}
 
 
 def test_rc_tab_wed_to_mon(client):
