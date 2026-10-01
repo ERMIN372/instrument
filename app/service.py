@@ -295,6 +295,9 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
     data, _ = _load(conn, prev_days + days + [days[-1] + DAY], source_id)  # +день: срез «на конец»
     items = _items(conn, {code for _, code in data})
 
+    # «На конец периода»: значения дней недели — заказы прошлых периодов, в итог они не входят;
+    # показывать их рядом с итогом — путать (15 960 на пн 14.09 при итоге 11 970 на 21.09).
+    weekly = src["agg"] == "end"
     rows = []
     for code, item in items.items():
         cells = data[(source_id, code)]
@@ -304,7 +307,7 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
             continue
         rows.append({
             **_item_row(item),
-            "days": [cells.get(d) for d in days],
+            "days": [None] * 7 if weekly else [cells.get(d) for d in days],
             "total": total,
             "prev": prev,
             "delta": delta(total, prev),
@@ -313,7 +316,8 @@ def by_days(conn, date: dt.date, source_id: int) -> dict | None:
         "period": week_info(start),
         "days": [day_info(d) for d in days],
         "source": src,
-        "covered": _coverage(conn, days).get(source_id, 0),
+        "as_of": (days[-1] + DAY).isoformat() if weekly else None,
+        "covered": 7 if weekly else _coverage(conn, days).get(source_id, 0),
         "rows": _sort(rows),
     }
 
@@ -353,11 +357,13 @@ def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
         if s["hidden"]:
             continue
         cells = data.get((s["id"], code), {})
+        weekly = s["agg"] == "end"  # см. by_days: дни недели в итог не входят
         out.append({
             "id": s["id"],
             "name": s["name"],
             "agg": s["agg"],
-            "days": [cells.get(d) for d in days],
+            "as_of": (days[-1] + DAY).isoformat() if weekly else None,
+            "days": [None] * 7 if weekly else [cells.get(d) for d in days],
             "total": aggregate(s["agg"], cells, days),
             "weeks": [{**week_info(w), "value": aggregate(s["agg"], cells, week_days(w))} for w in starts],
         })

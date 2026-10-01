@@ -320,3 +320,26 @@ def test_rc_tab_wed_to_mon(client):
     assert ws["E4"].value == "Остаток Ср 23.09" and ws["N4"].value == "Остаток Пн 28.09"
     assert ws["Q4"].value == "Потребл. нед. 38 14.09–20.09"
     assert [ws.cell(row=5, column=c).value for c in range(5, 18)] == [23, 100, 100, 100, 100, 5, 5, 5, 5, 28, 4, 14, 14]
+
+
+def test_weekly_order_is_not_split_by_days(client):
+    """Круассан со скрина: заказ склада на 14.09 (15 960) производили на неделе 07–13.09,
+    на 21.09 (11 970) — на неделе 14–20.09 вместе с планом 11 970."""
+    upload(client, "Заказ склада", xlsx([(dt.date(2026, 9, 14), BUN, 15960), (dt.date(2026, 9, 21), BUN, 11970)]))
+    upload(client, "План производства", xlsx([(dt.date(2026, 9, 17), BUN, 11970)]))
+    sid = client.get("/api/meta").json()["sources"][0]["id"]
+    client.patch(f"/api/sources/{sid}", json={"agg": "end"})
+
+    p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-16"}).json()
+    v = p["rows"][0]["values"]
+    assert [c["name"] for c in p["columns"]] == ["Заказ склада", "План производства"]
+    assert (v[0]["cur"], v[0]["prev"], v[1]["cur"]) == (11970, 15960, 11970)  # заказ = план недели
+
+    # По дням и в карточке заказ прошлой недели (15 960 на 14.09) рядом с итогом не показываем.
+    b = client.get("/api/by-days", params={"source_id": sid, "date": "2026-09-16"}).json()
+    assert b["rows"][0]["days"] == [None] * 7 and b["rows"][0]["total"] == 11970
+    assert b["as_of"] == "2026-09-21"
+    card = client.get(f"/api/item/{BUN[0]}", params={"date": "2026-09-16"}).json()
+    order = next(s for s in card["sources"] if s["name"] == "Заказ склада")
+    assert order["days"] == [None] * 7 and order["total"] == 11970 and order["as_of"] == "2026-09-21"
+    assert next(s for s in card["sources"] if s["name"] == "План производства")["days"][3] == 11970

@@ -68,6 +68,7 @@ body {
 }
 h2 { font-size: 16px; margin: 24px 0 8px; }
 .muted { color: var(--text-muted); }
+.note { text-align: center; font-size: 12px; }
 .hint { color: var(--text-secondary); font-size: 13px; margin: 0 0 12px; }
 .hint .warn { color: var(--warning); }
 

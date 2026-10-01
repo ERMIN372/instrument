@@ -364,7 +364,9 @@ function renderDays() {
   const data = state.data.days;
   if (!data) return;
   renderCategories(data.rows);
-  const cov = data.covered < 7 ? el("span", { class: "warn" }, ` ⚠ данные за ${data.covered} из 7 дн.`) : null;
+  const cov = data.as_of
+    ? ` Это недельная величина: заказ на ${ddmm(data.as_of)}, под который производят всю эту неделю; по дням не раскладывается.`
+    : data.covered < 7 ? el("span", { class: "warn" }, ` ⚠ данные за ${data.covered} из 7 дн.`) : null;
   setCaption(
     `${data.source.name} · ${data.period.label}. «Итого нед.» — ${AGG[data.source.agg]}. Δ — к пред. неделе.`, cov);
   const columns = [nameCol, unitCol,
@@ -473,7 +475,10 @@ async function loadDetail(scroll = false) {
   const head = el("tr", {}, el("th", {}, "Источник"), ...data.days.map((d) => el("th", {}, d.short)), el("th", { class: "sep" }, "Итого нед."));
   const body = el("tbody", {}, ...data.sources.map((s) => el("tr", {},
     el("td", {}, s.name, el("span", { class: "code" }, AGG[s.agg])),
-    ...s.days.map((v) => el("td", { class: `num ${isNil(v) ? "nil" : ""}` }, fmt(v))),
+    ...(s.as_of
+      ? [el("td", { colspan: s.days.length, class: "muted note" },
+          `заказ на ${ddmm(s.as_of)} — под него производят эту неделю, по дням не раскладывается`)]
+      : s.days.map((v) => el("td", { class: `num ${isNil(v) ? "nil" : ""}` }, fmt(v)))),
     el("td", { class: "num strong sep" }, fmt(s.total)),
   )));
   $("#detail-table").replaceChildren(el("thead", {}, head), body);
