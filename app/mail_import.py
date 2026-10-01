@@ -173,7 +173,7 @@ def start() -> threading.Event | None:
         return None
     if not cfg:
         return None
-    status.update(enabled=True, mailbox=cfg["user"], interval=cfg["interval"])
+    status.update(enabled=True, interval=cfg["interval"])  # адрес ящика на страницу не отдаём
     log.info("проверяю %s каждые %s с", cfg["user"], cfg["interval"])
     stop = threading.Event()
     threading.Thread(target=_loop, args=(cfg, stop), name="mail-import", daemon=True).start()

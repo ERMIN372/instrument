@@ -669,7 +669,7 @@ async function loadMail() {
   const next = m.checked_at ? new Date(new Date(m.checked_at).getTime() + m.interval * 1000).toISOString() : null;
   box.replaceChildren(...[
     el("h2", {}, "Почта"),
-    el("p", {}, `Ящик ${m.mailbox}, проверка каждые ${every} мин. `,
+    el("p", {}, `Проверка ящика каждые ${every} мин. `,
       m.checked_at ? `Последняя: ${when(m.checked_at)} (${ago(m.checked_at)}), следующая ≈ ${when(next)}.` : "Первая проверка идёт…"),
     m.error ? el("p", { class: "err" }, `Последняя проверка не удалась: ${m.error}`) : null,
     m.events.length
