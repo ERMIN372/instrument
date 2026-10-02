@@ -425,7 +425,7 @@ function renderAutoParams(data) {
       },
     }));
   $("#auto-params").replaceChildren(
-    field("stock_weeks", "Запас на конец недели, нед. потребления:", { min: 0, max: 8, step: 0.5, "aria-label": "Запас, недель" }),
+    field("cover_weeks", "Покрытие: остаток пн + заказ, нед. потребления:", { min: 0, max: 8, step: 0.5, "aria-label": "Покрытие, недель" }),
     field("k", "k при σ (формула Г):", { min: 0, max: 3, step: 0.1, "aria-label": "k при сигме" }),
     el("span", { class: "muted" }, "Параметры общие для всех. Источники — как во вкладке РЦ."));
 }
@@ -436,15 +436,15 @@ function renderBacktest(data) {
   $("#auto-bt-note").replaceChildren(
     el("b", {}, "Прогон по истории. "),
     weeks.length
-      ? `Те же формулы на прошлых неделях (заказ на нед. ${weeks.join(", ")}) против фактического потребления: остаток на конец недели = остаток пн + заказ − потребление. Цель — не меньше ${nf.format(data.params.stock_weeks)} нед. потребления.`
+      ? `Те же формулы на прошлых неделях (заказ на нед. ${weeks.join(", ")}) против фактического потребления: покрытие = (остаток пн + заказ) / потребление недели. Цель — не меньше ${nf.format(data.params.cover_weeks)} нед.; меньше 1 нед. — дефицит, к концу недели остаток в минусе.`
       : el("span", { class: "warn" }, "⚠ Нет прошедших недель с полными данными — прогонять не на чем, загрузи историю потребления и остатков."));
   if (!weeks.length) { $("#auto-backtest").replaceChildren(); return; }
   const cols = [
     ["Формула", (x) => x.label],
     ["Товаро-недель", (x) => fmt(x.n)],
-    ["Запас не ниже цели", (x) => (isNil(x.hit) ? "—" : pct.format(x.hit))],
-    ["Дефицит (остаток < 0)", (x) => (isNil(x.short) ? "—" : pct.format(x.short))],
-    ["Медиана запаса, нед.", (x) => fmt(x.cover)],
+    ["Покрытие не ниже цели", (x) => (isNil(x.hit) ? "—" : pct.format(x.hit))],
+    ["Дефицит (покрытие < 1)", (x) => (isNil(x.short) ? "—" : pct.format(x.short))],
+    ["Медиана покрытия, нед.", (x) => fmt(x.cover)],
   ];
   $("#auto-backtest").replaceChildren(
     el("thead", {}, el("tr", {}, ...cols.map(([h], i) => el("th", { class: i ? "num" : "" }, h)))),
@@ -462,7 +462,7 @@ function renderAuto() {
   const warns = data.columns.filter((c) => c.warn).map((c) => `${c.label.toLowerCase()} ${c.sub} — ${c.warn}`);
   setCaption(
     el("b", {}, "Демо-версия — пока тестируем. "),
-    `${data.period.label}. Заказ = (1 + запас) × потребление в неделю − остаток пн (расчёт, как во вкладке РЦ), не меньше 0; `
+    `${data.period.label}. Заказ = ${nf.format(data.params.cover_weeks)} × потребление в неделю − остаток пн (расчёт, как во вкладке РЦ), не меньше 0: остаток пн + заказ = ${nf.format(data.params.cover_weeks)} нед. потребления; `
       + "от 1 000 — до сотен, от 100 — до десятков. "
       + `Потребление — «${data.roles.consumption?.name ?? "не выбрано"}», неполные недели не в расчёте. `,
     unset.length ? el("span", { class: "warn" }, `⚠ Не выбран источник: ${unset.join(", ")}. `) : null,

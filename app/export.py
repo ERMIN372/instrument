@@ -211,9 +211,9 @@ def autoorder_workbook(table: dict, category: str | None = None, q: str | None =
     p = table["params"]
     ws["A1"] = f"Автозаказ (демо-версия, тестируем) · {table['period']['label']} · в базовых единицах"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
-    ws["A2"] = (f"Заказ = (1 + {p['stock_weeks']}) × потребление в неделю − остаток пн (у Г ещё + {p['k']}σ), "
-                f"не меньше 0; от 1 000 — до сотен, от 100 — до десятков. Потребление — «{names['consumption']}», "
-                f"остаток пн — как во вкладке РЦ.")
+    ws["A2"] = (f"Заказ = {p['cover_weeks']} × потребление в неделю − остаток пн (у Г ещё + {p['k']}σ), "
+                f"не меньше 0: остаток пн + заказ = {p['cover_weeks']} нед. потребления. От 1 000 — до сотен, "
+                f"от 100 — до десятков. Потребление — «{names['consumption']}», остаток пн — как во вкладке РЦ.")
     ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
 
     cols = table["columns"]
@@ -239,11 +239,12 @@ def autoorder_workbook(table: dict, category: str | None = None, q: str | None =
     weeks = ", ".join(w["iso"].split("-")[1] for w in bt["weeks"]) or "нет прошедших недель с данными"
     ws["A1"] = f"Прогон формул по прошлым неделям: {weeks}"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
-    ws["A2"] = (f"Остаток на конец недели = остаток пн + заказ − потребление этой недели. Цель — не меньше "
-                f"{p['stock_weeks']} нед. потребления. Считаются товаро-недели с потреблением больше нуля.")
+    ws["A2"] = (f"Покрытие = (остаток пн + заказ) / потребление этой недели, в неделях. Цель — не меньше "
+                f"{p['cover_weeks']}; меньше 1 — дефицит, к концу недели остаток в минусе. "
+                "Считаются товаро-недели с потреблением больше нуля.")
     ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
-    _header(ws, 4, ["Формула", "Товаро-недель", "Запас не ниже цели", "Дефицит (остаток < 0)",
-                    "Медиана запаса, нед."])
+    _header(ws, 4, ["Формула", "Товаро-недель", "Покрытие не ниже цели", "Дефицит (покрытие < 1)",
+                    "Медиана покрытия, нед."])
     for r, x in enumerate(bt["rows"], 5):
         for c, (v, f) in enumerate(((x["label"], None), (x["n"], NUM), (x["hit"], PCT_PLAIN),
                                     (x["short"], PCT_PLAIN), (x["cover"], "0.0")), 1):
