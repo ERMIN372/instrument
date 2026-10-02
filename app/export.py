@@ -198,6 +198,67 @@ def rc_workbook(table: dict, category: str | None = None, q: str | None = None) 
     return buf.getvalue()
 
 
+PCT_PLAIN = "0%"
+
+
+def autoorder_workbook(table: dict, category: str | None = None, q: str | None = None) -> bytes:
+    """Автозаказ (демо): лист с формулами А–Г по товарам и лист прогона по истории."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Автозаказ (демо)"
+    rows = filter_rows(table["rows"], category, q)
+    names = {role: (src or {}).get("name", "не выбран") for role, src in table["roles"].items()}
+    p = table["params"]
+    ws["A1"] = f"Автозаказ (демо-версия, тестируем) · {table['period']['label']} · в базовых единицах"
+    ws["A1"].font = Font(name=FONT, bold=True, size=13)
+    ws["A2"] = (f"Заказ = (1 + {p['stock_weeks']}) × потребление в неделю − остаток пн (у Г ещё + {p['k']}σ), "
+                f"не меньше 0; от 1 000 — до сотен, от 100 — до десятков. Потребление — «{names['consumption']}», "
+                f"остаток пн — как во вкладке РЦ.")
+    ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
+
+    cols = table["columns"]
+    labels = FIXED + [f"{c['label']} · {c['sub']}" for c in cols]
+    _header(ws, 4, labels)
+    first = r = 5
+    for row in rows:
+        _fixed_cells(ws, r, row)
+        for i, v in enumerate(row["values"]):
+            cell = ws.cell(row=r, column=5 + i, value=v)
+            cell.font = Font(name=FONT, bold=cols[i]["role"] == "formula")
+            cell.number_format = NUM
+        r += 1
+    last = max(first, r - 1)
+    sums = [5 + i for i, c in enumerate(cols) if c["key"] != "sigma"]  # σ складывать бессмысленно
+    _totals(ws, first, last, sorted({row["unit"] for row in rows}), sums, {})
+    _widths(ws, len(labels))
+    ws.freeze_panes = "E5"
+    ws.auto_filter.ref = f"A4:{get_column_letter(len(labels))}{last}"
+
+    bt = table["backtest"]
+    ws = wb.create_sheet("Прогон по истории")
+    weeks = ", ".join(w["iso"].split("-")[1] for w in bt["weeks"]) or "нет прошедших недель с данными"
+    ws["A1"] = f"Прогон формул по прошлым неделям: {weeks}"
+    ws["A1"].font = Font(name=FONT, bold=True, size=13)
+    ws["A2"] = (f"Остаток на конец недели = остаток пн + заказ − потребление этой недели. Цель — не меньше "
+                f"{p['stock_weeks']} нед. потребления. Считаются товаро-недели с потреблением больше нуля.")
+    ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
+    _header(ws, 4, ["Формула", "Товаро-недель", "Запас не ниже цели", "Дефицит (остаток < 0)",
+                    "Медиана запаса, нед."])
+    for r, x in enumerate(bt["rows"], 5):
+        for c, (v, f) in enumerate(((x["label"], None), (x["n"], NUM), (x["hit"], PCT_PLAIN),
+                                    (x["short"], PCT_PLAIN), (x["cover"], "0.0")), 1):
+            cell = ws.cell(row=r, column=c, value=v)
+            cell.font = Font(name=FONT)
+            if f:
+                cell.number_format = f
+    ws.column_dimensions["A"].width = 40
+    for c in "BCDE":
+        ws.column_dimensions[c].width = 18
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def workbook(pivot: dict, by_days: list[dict], category: str | None = None, q: str | None = None) -> bytes:
     wb = Workbook()
     used: set = set()

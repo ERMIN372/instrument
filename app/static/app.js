@@ -5,8 +5,9 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const nf = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 const nfCompact = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 });
 const pf = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" });
+const pct = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 0 });
 const AGG = { sum: "сумма", last: "остаток на начало", end: "на будущий период" };
-const TABLE_TABS = ["pivot", "rc", "days", "trend"];
+const TABLE_TABS = ["pivot", "rc", "auto", "days", "trend"];
 const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Выпуск", consumption: "Потребление" };
 
 const state = {
@@ -20,7 +21,7 @@ const state = {
   trendCount: 8,
   meta: { sources: [], weeks: [], days: [] },
   data: {},
-  sort: { pivot: {}, rc: {}, days: {}, trend: {} },
+  sort: { pivot: {}, rc: {}, auto: {}, days: {}, trend: {} },
   detail: null,
   detailSource: null,
 };
@@ -198,7 +199,7 @@ function renderFilters() {
   if (!tableTab) return;
   $("#mode-toggle").hidden = state.tab !== "pivot";
   for (const b of $$("#mode-toggle button")) b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode));
-  $("#source-select").hidden = state.tab === "pivot" || state.tab === "rc";
+  $("#source-select").hidden = ["pivot", "rc", "auto"].includes(state.tab);
   $("#count-wrap").hidden = state.tab !== "trend";
   $("#trend-count").value = String(state.trendCount);
 
@@ -209,8 +210,9 @@ function renderFilters() {
   const mode = state.tab === "pivot" ? state.mode : "week";
   const range = isRange();
   if (range) ensureRange();
-  $("#export").href = state.tab === "rc"
-    ? `api/export-rc.xlsx${qs({ date: state.date, category: state.category, q: state.q })}`
+  const own = { rc: "export-rc", auto: "export-autoorder" }[state.tab];  // у вкладок РЦ и автозаказа своя выгрузка
+  $("#export").href = own
+    ? `api/${own}.xlsx${qs({ date: state.date, category: state.category, q: state.q })}`
     : `api/export.xlsx${qs({ mode, ...pivotPeriod(), category: state.category, q: state.q })}`;
   $("#export").hidden = state.tab === "trend";
   $("#period-nav").hidden = range;
@@ -405,6 +407,84 @@ function renderRc() {
   grid($("#rc-table"), { columns, rows: filterRows(data.rows), view: "rc", onRowClick: (r) => openDetail(r.code) });
 }
 
+// ---------- автозаказ (демо): формулы А–Г рядом с фактическим заказом склада ----------
+
+function renderAutoParams(data) {
+  const field = (key, label, attrs) => el("label", { class: "inline" }, label,
+    el("input", {
+      type: "number", class: "num-input", value: data.params[key], required: true, ...attrs,
+      onchange: async (e) => {
+        if (!e.target.checkValidity()) { e.target.reportValidity(); return; }
+        try {
+          await api("api/autoorder-settings", {
+            method: "PUT", headers: { "content-type": "application/json" },
+            body: JSON.stringify({ [key]: Number(e.target.value) }),
+          });
+          load();
+        } catch (err) {
+          $("#caption").textContent = `Ошибка: ${err.message}`;
+        }
+      },
+    }));
+  $("#auto-params").replaceChildren(
+    field("stock_weeks", "Запас на конец недели, нед. потребления:", { min: 0, max: 8, step: 0.5, "aria-label": "Запас, недель" }),
+    field("k", "k при σ (формула Г):", { min: 0, max: 3, step: 0.1, "aria-label": "k при сигме" }),
+    el("span", { class: "muted" }, "Параметры общие для всех. Источники — как во вкладке РЦ."));
+}
+
+function renderBacktest(data) {
+  const bt = data.backtest;
+  const weeks = bt.weeks.map((w) => w.iso.replace(/^\d+-W/, ""));
+  $("#auto-bt-note").replaceChildren(
+    el("b", {}, "Прогон по истории. "),
+    weeks.length
+      ? `Те же формулы на прошлых неделях (заказ на нед. ${weeks.join(", ")}) против фактического потребления: остаток на конец недели = остаток пн + заказ − потребление. Цель — не меньше ${nf.format(data.params.stock_weeks)} нед. потребления.`
+      : el("span", { class: "warn" }, "⚠ Нет прошедших недель с полными данными — прогонять не на чем, загрузи историю потребления и остатков."));
+  if (!weeks.length) { $("#auto-backtest").replaceChildren(); return; }
+  const cols = [
+    ["Формула", (x) => x.label],
+    ["Товаро-недель", (x) => fmt(x.n)],
+    ["Запас не ниже цели", (x) => (isNil(x.hit) ? "—" : pct.format(x.hit))],
+    ["Дефицит (остаток < 0)", (x) => (isNil(x.short) ? "—" : pct.format(x.short))],
+    ["Медиана запаса, нед.", (x) => fmt(x.cover)],
+  ];
+  $("#auto-backtest").replaceChildren(
+    el("thead", {}, el("tr", {}, ...cols.map(([h], i) => el("th", { class: i ? "num" : "" }, h)))),
+    el("tbody", {}, ...bt.rows.map((x) => el("tr", { class: x.key === "fact" ? "muted" : "" },
+      ...cols.map(([, get], i) => el("td", { class: i ? "num" : "" }, get(x)))))));
+}
+
+function renderAuto() {
+  const data = state.data.auto;
+  if (!data) return;
+  renderCategories(data.rows);
+  renderAutoParams(data);
+  renderBacktest(data);
+  const unset = Object.keys(RC_ROLES).filter((r) => !data.roles[r]).map((r) => RC_ROLES[r].toLowerCase());
+  const warns = data.columns.filter((c) => c.warn).map((c) => `${c.label.toLowerCase()} ${c.sub} — ${c.warn}`);
+  setCaption(
+    el("b", {}, "Демо-версия — пока тестируем. "),
+    `${data.period.label}. Заказ = (1 + запас) × потребление в неделю − остаток пн (расчёт, как во вкладке РЦ), не меньше 0; `
+      + "от 1 000 — до сотен, от 100 — до десятков. "
+      + `Потребление — «${data.roles.consumption?.name ?? "не выбрано"}», неполные недели не в расчёте. `,
+    unset.length ? el("span", { class: "warn" }, `⚠ Не выбран источник: ${unset.join(", ")}. `) : null,
+    warns.length ? el("span", { class: "warn" }, `⚠ ${warns.join("; ")}`) : null,
+  );
+  const columns = [nameCol, unitCol, ...data.columns.map((c, i) => ({
+    key: c.key,
+    label: c.label,
+    sub: c.sub + (c.warn ? ` · ${c.warn}` : ""),
+    subWarn: !!c.warn,
+    num: true,
+    sep: i === 0 || c.role !== data.columns[i - 1].role,
+    cls: c.role === "formula" || c.role === "stock" ? "strong" : "",
+    get: (r) => r.values[i],
+    render: (r) => fmt(r.values[i]),
+    total: c.key === "sigma" ? null : (rows) => fmt(sum(rows.map((r) => r.values[i]))),  // σ не складываем
+  }))];
+  grid($("#auto-table"), { columns, rows: filterRows(data.rows), view: "auto", onRowClick: (r) => openDetail(r.code) });
+}
+
 // ---------- по дням: один источник, товары × дни недели ----------
 
 function renderDays() {
@@ -464,7 +544,7 @@ function renderTrend() {
 }
 
 function renderCurrent() {
-  ({ pivot: renderPivot, rc: renderRc, days: renderDays, trend: renderTrend })[state.tab]?.();
+  ({ pivot: renderPivot, rc: renderRc, auto: renderAuto, days: renderDays, trend: renderTrend })[state.tab]?.();
 }
 
 // ---------- загрузка данных вкладок ----------
@@ -474,7 +554,7 @@ async function load() {
   if (!TABLE_TABS.includes(state.tab)) return;
   if (!state.meta.days.length) {
     $("#caption").textContent = "Данных пока нет — загрузи xlsx на вкладке «Загрузка».";
-    for (const t of ["#pivot-table", "#rc-table", "#days-table", "#trend-table"]) $(t).replaceChildren();
+    for (const t of ["#pivot-table", "#rc-table", "#auto-table", "#auto-backtest", "#days-table", "#trend-table"]) $(t).replaceChildren();
     return;
   }
   if (!state.sourceId && state.meta.sources.length) state.sourceId = state.meta.sources[0].id;
@@ -483,6 +563,8 @@ async function load() {
       state.data.pivot = await api(`api/pivot${qs({ mode: state.mode, ...pivotPeriod() })}`);
     } else if (state.tab === "rc") {
       state.data.rc = await api(`api/rc${qs({ date: state.date })}`);
+    } else if (state.tab === "auto") {
+      state.data.auto = await api(`api/autoorder${qs({ date: state.date })}`);
     } else if (state.tab === "days") {
       state.data.days = await api(`api/by-days${qs({ source_id: state.sourceId, date: state.date })}`);
     } else {

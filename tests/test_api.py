@@ -481,3 +481,77 @@ def test_pivot_spent_last_two_weeks(client):
     ws = load_workbook(io.BytesIO(x.content))["Сводная"]
     assert "Расход" in ws["A2"].value
     assert [c.value for c in ws[4]][-3:] == ["Расход нед. 40", "Расход нед. 40 · пред.", "Расход нед. 40 · Δ"]
+
+
+def test_autoorder_formulas_and_backtest(client):
+    """Автозаказ (демо) на неделю 39 (21–27.09): заказ на неделю 40 (28.09–04.10).
+    Остаток пн 28.09 — расчёт вкладки РЦ, потребление — «Заказ покупателей» за прошлые недели,
+    заказ = (1 + запас 2) × потребление − остаток. Прогон — по прошлым неделям против факта."""
+    import statistics
+    D = dt.date
+    # Потребление в день по неделям 31–39 (27.07–27.09) + уже известные заказы на 28–29.09.
+    per_day = [10, 12, 8, 11, 10, 9, 10, 12, 14]
+    weekly = [7 * v for v in per_day]  # 70, 84, 56, 77, 70, 63, 70, 84, 98
+    orders = [(d, BUN, v) for i, v in enumerate(per_day) for d in days(D(2026, 7, 27) + i * dt.timedelta(7), 7)]
+    upload(client, "Заказ покупателей", xlsx(orders + [(D(2026, 9, 28), BUN, 20), (D(2026, 9, 29), BUN, 20)]))
+    upload(client, "Остатки на начало периода", xlsx([(D(2026, 9, 9), BUN, 100), (D(2026, 9, 16), BUN, 120),
+                                                      (D(2026, 9, 23), BUN, 150)]))
+    upload(client, "Выпуск производства", xlsx([(d, BUN, 15) for d in days(D(2026, 9, 7), 21)]))
+    upload(client, "Заказ склада", xlsx([(D(2026, 9, 14), BUN, 200), (D(2026, 9, 21), BUN, 210),
+                                         (D(2026, 9, 28), BUN, 220)]))
+    sid = next(s["id"] for s in client.get("/api/meta").json()["sources"] if s["name"] == "Заказ склада")
+    client.patch(f"/api/sources/{sid}", json={"agg": "end"})
+
+    t = client.get("/api/autoorder", params={"date": "2026-09-23"}).json()
+    assert t["period"]["label"] == "Ср 23.09 → заказ на нед. 40 · 28.09–04.10.2026"
+    assert t["params"] == {"stock_weeks": 2, "k": 1}
+    assert t["warehouse"]["name"] == "Заказ склада"
+    assert [(c["label"], c["sub"], c["warn"]) for c in t["columns"]] == [
+        ("Потребл. нед. 36", "31.08–06.09", None), ("Потребл. нед. 37", "07.09–13.09", None),
+        ("Потребл. нед. 38", "14.09–20.09", None), ("Ср. 8 нед.", "полных 8/8", None),
+        ("Разброс σ", "8 нед.", None), ("Остаток расчёт", "Пн 28.09", None),
+        ("Уже в 1С на нед. 40", "28.09–04.10", None), ("Заказ склада", "факт на 28.09", None),
+        ("А · среднее 3 нед.", "3 × ср. − остаток", None), ("Б · взвешенное 3 нед.", "3 × взвеш. − остаток", None),
+        ("В · максимум 3 нед.", "3 × макс. − остаток", None), ("Г · среднее 8 нед. + σ", "3 × ср. + 1σ − остаток", None),
+    ]
+    hist = weekly[:8]
+    mean, sigma = statistics.fmean(hist), statistics.stdev(hist)
+    stock = 150 - 5 * 14 + 5 * 15  # 155: остаток ср − заказ Ср–Вс + выпуск Ср–Вс, как во вкладке РЦ
+    (row,) = t["rows"]
+    assert row["values"][:3] == [63, 70, 84]
+    assert row["values"][3:5] == [pytest.approx(mean), pytest.approx(sigma)]
+    assert row["values"][5:8] == [stock, 40, 220]
+    assert row["values"][8:] == [
+        62,                              # 3 × 72,3 − 155 = 62
+        72,                              # 3 × (0,2·63 + 0,3·70 + 0,5·84) − 155 = 71,8
+        round(3 * 84 - stock),           # 97
+        round(3 * mean + sigma - stock),
+    ]
+
+    # Прогон: остаток на среду есть только у недель 37 и 38 — по две товаро-недели на формулу.
+    bt = t["backtest"]
+    assert [w["iso"] for w in bt["weeks"]] == [f"2026-W{n}" for n in range(32, 40)]
+    by_key = {x["key"]: x for x in bt["rows"]}
+    assert {k: x["n"] for k, x in by_key.items()} == {"a": 2, "b": 2, "c": 2, "d": 2, "fact": 2}
+    # Нед. 37: остаток пн 14.09 = 100 − 50 + 75 = 125, заказ А = 3 × 70 − 125 = 85, потребление нед. 38 = 84.
+    # Нед. 38: остаток пн 21.09 = 120 − 60 + 75 = 135, заказ А = 3 × 67,7 − 135 = 68, потребление нед. 39 = 98.
+    assert by_key["a"]["cover"] == pytest.approx(((125 + 85 - 84) / 84 + (135 + 68 - 98) / 98) / 2)
+    assert by_key["a"]["hit"] == 0 and by_key["a"]["short"] == 0
+    # Как заказали на самом деле: 200 и 210 — запас выше двух недель оба раза.
+    assert by_key["fact"]["hit"] == 1
+    assert by_key["fact"]["cover"] == pytest.approx(((125 + 200 - 84) / 84 + (135 + 210 - 98) / 98) / 2)
+
+    # Параметры общие и сохраняются; запас 1 нед.: 2 × 72,3 − 155 < 0 → 0.
+    assert client.put("/api/autoorder-settings", json={"stock_weeks": 1}).json() == {"stock_weeks": 1, "k": 1}
+    t = client.get("/api/autoorder", params={"date": "2026-09-23"}).json()
+    assert t["rows"][0]["values"][8] == 0
+    assert t["columns"][8]["sub"] == "2 × ср. − остаток"
+    assert client.put("/api/autoorder-settings", json={"stock_weeks": 20}).status_code == 422
+
+    r = client.get("/api/export-autoorder.xlsx", params={"date": "2026-09-23"})
+    wb = load_workbook(io.BytesIO(r.content))
+    assert wb.sheetnames == ["Автозаказ (демо)", "Прогон по истории"]
+    ws = wb["Автозаказ (демо)"]
+    assert "демо" in ws["A1"].value and ws["M4"].value == "А · среднее 3 нед. · 2 × ср. − остаток"
+    assert ws["M5"].value == 0
+    assert wb["Прогон по истории"]["A9"].value == "Как заказали: Заказ склада"
