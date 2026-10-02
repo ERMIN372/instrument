@@ -93,14 +93,13 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 .periodnav { display: flex; gap: 6px; align-items: center; }
 #range-form { flex-wrap: wrap; }
 .inline { display: flex; gap: 6px; align-items: center; color: var(--text-secondary); }
-select, input[type="text"], input[type="search"], input[type="date"], input[type="number"] {
+select, input[type="text"], input[type="search"], input[type="date"] {
   font: inherit; color: var(--text-primary);
   background: var(--surface-1);
   border: 1px solid var(--border); border-radius: 6px;
   padding: 5px 8px; min-height: 32px; max-width: 100%;
 }
 #search { width: 240px; }
-.num-input { width: 80px; }
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .seg button {
   font: inherit; border: 0; background: var(--surface-1); color: var(--text-secondary);
@@ -157,6 +156,8 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-var
 .grid tr.item:hover td, .grid tr.item.active td { background: var(--accent-wash); }
 .grid td.nil { color: var(--text-muted); }
 .grid td.strong { font-weight: 700; }
+.grid thead th.why { text-align: left; }
+.grid td.why { color: var(--text-secondary); font-size: 12px; white-space: normal; min-width: 150px; max-width: 220px; }
 .grid td.sep, .grid th.sep { border-left: 1px solid var(--grid); }
 .grid .code { color: var(--text-muted); font-size: 11px; margin-left: 6px; }
 .grid .delta { display: block; font-size: 11px; color: var(--text-muted); }
@@ -226,5 +227,4 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-var
 }
 
 .grid.compact thead th { text-align: left; }
-.grid.compact thead th.num { text-align: right; }
 #sources-table input[type="text"] { width: 100%; min-width: 240px; }

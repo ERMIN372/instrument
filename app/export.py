@@ -202,35 +202,38 @@ PCT_PLAIN = "0%"
 
 
 def autoorder_workbook(table: dict, category: str | None = None, q: str | None = None) -> bytes:
-    """Автозаказ (демо): лист с формулами А–Г по товарам и лист прогона по истории."""
+    """Автозаказ (демо): по каждой формуле — заказ и «почему так»; вторым листом — прогон по истории."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Автозаказ (демо)"
     rows = filter_rows(table["rows"], category, q)
-    names = {role: (src or {}).get("name", "не выбран") for role, src in table["roles"].items()}
     p = table["params"]
     ws["A1"] = f"Автозаказ (демо-версия, тестируем) · {table['period']['label']} · в базовых единицах"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
-    ws["A2"] = (f"Заказ = {p['cover_weeks']} × потребление в неделю − остаток пн (у Г ещё + {p['k']}σ), "
-                f"не меньше 0: остаток пн + заказ = {p['cover_weeks']} нед. потребления. От 1 000 — до сотен, "
-                f"от 100 — до десятков. Потребление — «{names['consumption']}», остаток пн — как во вкладке РЦ.")
+    ws["A2"] = (f"Заказ = {p['cover_weeks']} × расход в неделю − остаток на пн (у Г ещё + {p['k']}σ), не меньше 0; "
+                "от 1 000 — до сотен, от 100 — до десятков.")
     ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
 
-    cols = table["columns"]
-    labels = FIXED + [f"{c['label']} · {c['sub']}" for c in cols]
+    formulas = table["formulas"]
+    labels = list(FIXED)
+    for f in formulas:
+        labels += [f"{f['label']} · заказ", f"{f['label']} · почему"]
     _header(ws, 4, labels)
     first = r = 5
     for row in rows:
         _fixed_cells(ws, r, row)
-        for i, v in enumerate(row["values"]):
-            cell = ws.cell(row=r, column=5 + i, value=v)
-            cell.font = Font(name=FONT, bold=cols[i]["role"] == "formula")
+        for i, offer in enumerate(row["offers"]):
+            cell = ws.cell(row=r, column=5 + 2 * i, value=offer["value"])
+            cell.font = Font(name=FONT, bold=True)
             cell.number_format = NUM
+            ws.cell(row=r, column=6 + 2 * i, value=offer["why"]).font = Font(name=FONT, color="6B7280")
         r += 1
     last = max(first, r - 1)
-    sums = [5 + i for i, c in enumerate(cols) if c["key"] != "sigma"]  # σ складывать бессмысленно
-    _totals(ws, first, last, sorted({row["unit"] for row in rows}), sums, {})
+    orders = [5 + 2 * i for i in range(len(formulas))]
+    _totals(ws, first, last, sorted({row["unit"] for row in rows}), orders, {})
     _widths(ws, len(labels))
+    for c in orders:
+        ws.column_dimensions[get_column_letter(c + 1)].width = 42
     ws.freeze_panes = "E5"
     ws.auto_filter.ref = f"A4:{get_column_letter(len(labels))}{last}"
 
