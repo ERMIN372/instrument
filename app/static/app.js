@@ -9,6 +9,7 @@ const pct = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDi
 const AGG = { sum: "сумма", last: "остаток на начало", end: "на будущий период" };
 const TABLE_TABS = ["pivot", "rc", "auto", "days", "trend"];
 const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Выпуск", consumption: "Потребление" };
+const BUYERS_RE = /заказ\S* покуп/i;  // «Динамика» по умолчанию — заказ покупателей
 
 const state = {
   tab: "pivot",
@@ -17,7 +18,7 @@ const state = {
   range: null,        // сводная, режим «Период»: { from, to } (ISO, включительно)
   category: "",
   q: "",
-  sourceId: null,     // для «По дням» и «Динамики»
+  source: { days: null, trend: null },  // источник «По дням» и «Динамики» — у каждой вкладки свой
   trendCount: 8,
   meta: { sources: [], weeks: [], days: [] },
   data: {},
@@ -205,7 +206,7 @@ function renderFilters() {
 
   const srcSel = $("#source-select");
   srcSel.replaceChildren(...state.meta.sources.map((s) => el("option", { value: s.id }, s.name)));
-  if (state.sourceId) srcSel.value = String(state.sourceId);
+  if (state.source[state.tab]) srcSel.value = String(state.source[state.tab]);
 
   const mode = state.tab === "pivot" ? state.mode : "week";
   const range = isRange();
@@ -334,8 +335,9 @@ function renderPivot() {
   // Колонки: «сумма» за дни периода или срез на дату (остаток на начало / на конец, значение на конец периода).
   const partial = data.columns.filter((c) => c.covered < c.of);
   const gap = (c) => (c.date ? `${c.name} — нет среза на ${ddmm(c.date)}` : `${c.name} — ${c.covered} из ${c.of} дн.`);
+  const gapSub = (c) => (c.covered >= c.of ? "" : c.date ? " · нет данных" : ` · ${c.covered}/${c.of} дн.`);
   const spent = data.columns.some((c) => c.kind === "spent")
-    ? "Расход — заказ склада за две прошлые недели, как в «Динамике» (срез на пн следующей недели), его Δ — к неделе раньше. " : "";
+    ? "Расход — заказ покупателей за две прошлые недели (за неделю, как в «Динамике»), его Δ — к неделе раньше. " : "";
   setCaption(
     `${data.period.label}. Значения в базовых единицах (шт, кг). Остатки — срез на начало периода и на начало следующего. Δ — ${data.period.compare}. ${spent}`,
     partial.length ? el("span", { class: "warn" }, `⚠ Неполные данные: ${partial.map(gap).join("; ")}`) : null,
@@ -343,11 +345,7 @@ function renderPivot() {
   const columns = [nameCol, unitCol, ...data.columns.map((s, i) => ({
     key: `s${s.key}`,
     label: s.name,
-    sub: s.week
-      ? `${ddmm(s.week.start)}–${ddmm(s.week.end)}${s.covered ? "" : " · нет данных"}`
-      : s.date
-        ? `на ${ddmm(s.date)}${s.covered ? "" : " · нет данных"}`
-        : AGG[s.agg] + (s.covered < s.of ? ` · ${s.covered}/${s.of} дн.` : ""),
+    sub: (s.week ? `${ddmm(s.week.start)}–${ddmm(s.week.end)}` : s.date ? `на ${ddmm(s.date)}` : AGG[s.agg]) + gapSub(s),
     subWarn: s.covered < s.of,
     num: true,
     sep: true,
@@ -557,7 +555,6 @@ async function load() {
     for (const t of ["#pivot-table", "#rc-table", "#auto-table", "#auto-backtest", "#days-table", "#trend-table"]) $(t).replaceChildren();
     return;
   }
-  if (!state.sourceId && state.meta.sources.length) state.sourceId = state.meta.sources[0].id;
   try {
     if (state.tab === "pivot") {
       state.data.pivot = await api(`api/pivot${qs({ mode: state.mode, ...pivotPeriod() })}`);
@@ -566,9 +563,9 @@ async function load() {
     } else if (state.tab === "auto") {
       state.data.auto = await api(`api/autoorder${qs({ date: state.date })}`);
     } else if (state.tab === "days") {
-      state.data.days = await api(`api/by-days${qs({ source_id: state.sourceId, date: state.date })}`);
+      state.data.days = await api(`api/by-days${qs({ source_id: state.source.days, date: state.date })}`);
     } else {
-      state.data.trend = await api(`api/trend${qs({ source_id: state.sourceId, end: state.date, count: state.trendCount })}`);
+      state.data.trend = await api(`api/trend${qs({ source_id: state.source.trend, end: state.date, count: state.trendCount })}`);
     }
     renderCurrent();
     if (state.detail) loadDetail();
@@ -580,7 +577,12 @@ async function load() {
 async function loadMeta() {
   state.meta = await api("api/meta");
   if (!state.date || !state.meta.days.some((d) => d.date === state.date)) state.date = defaultDate();
-  if (state.sourceId && !state.meta.sources.some((s) => s.id === state.sourceId)) state.sourceId = null;
+  // Источник не выбран или удалён — по умолчанию: «Динамика» — заказ покупателей, «По дням» — первый.
+  const srcs = state.meta.sources;
+  for (const tab of Object.keys(state.source)) {
+    if (srcs.some((s) => s.id === state.source[tab])) continue;
+    state.source[tab] = ((tab === "trend" && srcs.find((s) => BUYERS_RE.test(s.name))) || srcs[0])?.id ?? null;
+  }
 }
 
 // ---------- карточка товара ----------
@@ -955,7 +957,7 @@ function bind() {
   });
   $("#period-prev").addEventListener("click", () => stepPeriod(-1));
   $("#period-next").addEventListener("click", () => stepPeriod(1));
-  $("#source-select").addEventListener("change", (e) => { state.sourceId = Number(e.target.value); load(); });
+  $("#source-select").addEventListener("change", (e) => { state.source[state.tab] = Number(e.target.value); load(); });
   $("#trend-count").addEventListener("change", (e) => { state.trendCount = Number(e.target.value); savePrefs(); load(); });
   $("#category-select").addEventListener("change", (e) => { state.category = e.target.value; renderFilters(); renderCurrent(); });
   let t;
