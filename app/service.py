@@ -764,6 +764,18 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
     if not roles["stock"] or wed not in source_days[roles["stock"]]:
         warnings.append(f"нет остатка на ср {wed:%d.%m}")
 
+    # Как считаем — над таблицей и в xlsx, с номерами недель выбранного периода.
+    wk = [(start - (AUTO_WEEKS - i) * WEEK).isocalendar()[1] for i in range(AUTO_WEEKS)]
+    a, b, c = (f"нед. {n}" for n in wk[-3:])
+    sigma = "разброс σ" if k == 1 else f"{_num(k)} × разброс σ"
+    rules = [f"расход = ({a} + {b} + {c}) / 3",
+             f"расход = 0,2 × {a} + 0,3 × {b} + 0,5 × {c} — свежая неделя важнее",
+             f"расход = самая большая из {a}, {b}, {c}",
+             f"расход = среднее за {AUTO_WEEKS} нед. (нед. {wk[0]}–{wk[-1]}), к заказу ещё + {sigma} — "
+             "насколько недели отличаются друг от друга, страховка от скачков"]
+    sun = wed + 4 * DAY
+    cons_name = by_id[cons_sid]["name"] if cons_sid else "не выбран"
+
     return {
         "period": {
             **week_info(start),
@@ -772,7 +784,13 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
         "roles": {role: {"id": sid, "name": by_id[sid]["name"]} if sid else None for role, sid in roles.items()},
         "warehouse": {"id": wh["id"], "name": wh["name"]} if wh else None,
         "params": params,
-        "formulas": [{"key": key, "label": label} for key, label in AUTO_FORMULAS],
+        "formula": f"Заказ = расход в неделю × {_num(cw)} − остаток на пн {nxt:%d.%m}",
+        "formula_note": (f"чтобы остаток + заказ = {_num(cw)} нед. расхода. Меньше нуля — 0; от 1 000 округляем "
+                         "до сотен, от 100 — до десятков."),
+        "basis": (f"Расход — «{cons_name}» за неделю пн–вс, неполные недели не считаем. Остаток на пн — как во "
+                  f"вкладке РЦ: остаток ср {wed:%d.%m} − заказы {wed:%d.%m}–{sun:%d.%m} + выпуск "
+                  f"{wed:%d.%m}–{sun:%d.%m}."),
+        "formulas": [{"key": key, "label": label, "rule": rule} for (key, label), rule in zip(AUTO_FORMULAS, rules)],
         "warnings": warnings,
         "rows": _sort(rows),
         "backtest": {

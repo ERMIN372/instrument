@@ -210,11 +210,12 @@ def autoorder_workbook(table: dict, category: str | None = None, q: str | None =
     p = table["params"]
     ws["A1"] = f"Автозаказ (демо-версия, тестируем) · {table['period']['label']} · в базовых единицах"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
-    ws["A2"] = (f"Заказ = {p['cover_weeks']} × расход в неделю − остаток на пн (у Г ещё + {p['k']}σ), не меньше 0; "
-                "от 1 000 — до сотен, от 100 — до десятков.")
-    ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
-
     formulas = table["formulas"]
+    ws["A2"] = f"{table['formula']} — {table['formula_note']} {table['basis']}"
+    ws["A3"] = "; ".join(f"{f['label']}: {f['rule']}" for f in formulas)
+    for cell in (ws["A2"], ws["A3"]):
+        cell.font = Font(name=FONT, italic=True, color="6B7280", size=9)
+
     labels = list(FIXED)
     for f in formulas:
         labels += [f"{f['label']} · заказ", f"{f['label']} · почему"]
