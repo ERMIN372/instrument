@@ -292,13 +292,13 @@ def autoorder(date: str | None = None):
 
 
 class AutoSettings(BaseModel):
-    stock_weeks: float | None = Field(None, ge=0, le=8)
+    cover_weeks: float | None = Field(None, ge=0, le=8)
     k: float | None = Field(None, ge=0, le=3)
 
 
 @app.put("/api/autoorder-settings")
 def autoorder_settings(body: AutoSettings):
-    """Параметры автозаказа: запас на конец недели в неделях потребления и k для σ (общая настройка)."""
+    """Параметры автозаказа: покрытие (остаток пн + заказ) в неделях потребления и k для σ (общая настройка)."""
     with db.pool.connection() as conn:
         service.save_auto_settings(conn, body.model_dump(exclude_unset=True, exclude_none=True))
         return service.auto_settings(conn)
