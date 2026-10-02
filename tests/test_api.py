@@ -432,53 +432,52 @@ def test_order_columns_current_and_future(client):
 
 
 def test_pivot_spent_last_two_weeks(client):
-    """Расход в конце сводной: заказ склада на текущий период за две недели до выбранной
-    (неделя 05–11.10 → срезы 21.09 и 28.09), Δ — к неделе раньше, и среднее по ним.
-    Товара нет в срезе на пн — его не заказывали: в среднем это 0, а не пропуск."""
+    """Расход в конце сводной: заказ склада за две недели до выбранной — как во вкладке
+    «Динамика», где неделя = срез на пн следующей. Неделя 05–11.10 → нед. 39 (срез 28.09)
+    и нед. 40 (срез 05.10), Δ — к неделе раньше."""
     D = dt.date
     upload(client, "Остатки на начало периода", xlsx([(D(2026, 10, 5), BUN, 100)]))
     upload(client, "Заказ склада", xlsx([
         (D(2026, 9, 14), BUN, 10), (D(2026, 9, 21), BUN, 17), (D(2026, 9, 21), LOAF, 3),
         (D(2026, 9, 28), BUN, 24), (D(2026, 10, 5), BUN, 30)]))
     srcs = {x["name"]: x["id"] for x in client.get("/api/meta").json()["sources"]}
-    client.patch(f"/api/sources/{srcs['Заказ склада']}", json={"agg": "end"})
+    sid = srcs["Заказ склада"]
+    client.patch(f"/api/sources/{sid}", json={"agg": "end"})
 
     p = client.get("/api/pivot", params={"mode": "week", "date": "2026-10-07"}).json()
-    cols = p["columns"][-3:]
-    assert [(c["name"], c["kind"], c["date"], c["covered"], c["of"]) for c in cols] == [
-        ("Расход нед. 39", "spent", "2026-09-21", 1, 1),
-        ("Расход нед. 40", "spent", "2026-09-28", 1, 1),
-        ("Расход в среднем за 2 нед.", "avg", None, 2, 2),
+    cols = p["columns"][-2:]
+    assert [(c["name"], c["kind"], c["date"], c["covered"], c["week"]["start"]) for c in cols] == [
+        ("Расход нед. 39", "spent", "2026-09-28", 1, "2026-09-21"),
+        ("Расход нед. 40", "spent", "2026-10-05", 1, "2026-09-28"),
     ]
-    assert cols[2]["weeks"] == ["2026-09-21", "2026-09-28"]
-    assert p["columns"][-4]["name"] == "Остатки на конец периода"  # новые — после остатков на конец
-    rows = {r["code"]: r["values"][-3:] for r in p["rows"]}
+    assert p["columns"][-3]["name"] == "Остатки на конец периода"  # новые — после остатков на конец
+    rows = {r["code"]: r["values"][-2:] for r in p["rows"]}
     assert rows["001"] == [
-        {"cur": 17, "prev": 10, "delta": (17 - 10) / 10},
         {"cur": 24, "prev": 17, "delta": (24 - 17) / 17},
-        {"cur": 20.5, "prev": None, "delta": None},
+        {"cur": 30, "prev": 24, "delta": (30 - 24) / 24},
     ]
-    assert [v["cur"] for v in rows["002"]] == [3, None, 1.5]
+    assert rows["002"] == [{"cur": None, "prev": 3, "delta": None}, {"cur": None, "prev": None, "delta": None}]
 
-    # День 30.09 — две недели до его недели (28.09): срезы 14.09 и 21.09.
+    # Сверка с «Динамикой» по тем же неделям — цифры должны совпадать.
+    t = client.get("/api/trend", params={"source_id": sid, "end": "2026-09-28", "count": 2}).json()
+    assert [w["iso"] for w in t["weeks"]] == ["2026-W39", "2026-W40"]
+    assert {r["code"]: r["values"] for r in t["rows"]}["001"] == [v["cur"] for v in rows["001"]]
+
+    # День 30.09 — две недели до его недели (28.09): нед. 38 и 39, срезы 21.09 и 28.09.
     p = client.get("/api/pivot", params={"mode": "day", "date": "2026-09-30"}).json()
-    cols = p["columns"][-3:]
-    assert [(c["date"], c["covered"]) for c in cols] == [("2026-09-14", 1), ("2026-09-21", 1), (None, 2)]
-    # Неделя 21.09 → срезы 07.09 (нет файла) и 14.09: среднее по одной неделе, предупреждение 1/2 нед.
-    p = client.get("/api/pivot", params={"mode": "week", "date": "2026-09-23"}).json()
-    cols = p["columns"][-3:]
-    assert [(c["date"], c["covered"]) for c in cols] == [("2026-09-07", 0), ("2026-09-14", 1), (None, 1)]
-    assert {r["code"]: r["values"][-1]["cur"] for r in p["rows"]} == {"001": 10, "002": None}
+    assert [(c["name"], c["date"], c["covered"]) for c in p["columns"][-2:]] == [
+        ("Расход нед. 38", "2026-09-21", 1), ("Расход нед. 39", "2026-09-28", 1)]
+    # Неделя 12.10 → нед. 41 со срезом на 12.10, а его нет — «нет данных».
+    p = client.get("/api/pivot", params={"mode": "week", "date": "2026-10-12"}).json()
+    assert [(c["date"], c["covered"]) for c in p["columns"][-2:]] == [("2026-10-05", 1), ("2026-10-12", 0)]
 
     # Без заказа склада колонок расхода нет.
-    client.patch(f"/api/sources/{srcs['Заказ склада']}", json={"agg": "sum"})
+    client.patch(f"/api/sources/{sid}", json={"agg": "sum"})
     p = client.get("/api/pivot", params={"mode": "week", "date": "2026-10-07"}).json()
-    assert not any(c["kind"] in ("spent", "avg") for c in p["columns"])
+    assert not any(c["kind"] == "spent" for c in p["columns"])
 
-    client.patch(f"/api/sources/{srcs['Заказ склада']}", json={"agg": "end"})
+    client.patch(f"/api/sources/{sid}", json={"agg": "end"})
     x = client.get("/api/export.xlsx", params={"mode": "week", "date": "2026-10-07"})
     ws = load_workbook(io.BytesIO(x.content))["Сводная"]
     assert "Расход" in ws["A2"].value
-    header = [c.value for c in ws[4]]
-    assert header[-3:] == ["Расход в среднем за 2 нед.", "Расход в среднем за 2 нед. · пред.",
-                           "Расход в среднем за 2 нед. · Δ"]
+    assert [c.value for c in ws[4]][-3:] == ["Расход нед. 40", "Расход нед. 40 · пред.", "Расход нед. 40 · Δ"]

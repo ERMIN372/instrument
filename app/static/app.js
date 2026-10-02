@@ -331,10 +331,9 @@ function renderPivot() {
   renderCategories(data.rows);
   // Колонки: «сумма» за дни периода или срез на дату (остаток на начало / на конец, значение на конец периода).
   const partial = data.columns.filter((c) => c.covered < c.of);
-  const unit = (c) => (c.kind === "avg" ? "нед." : "дн.");
-  const gap = (c) => (c.date ? `${c.name} — нет среза на ${ddmm(c.date)}` : `${c.name} — ${c.covered} из ${c.of} ${unit(c)}`);
-  const spent = data.columns.some((c) => c.kind === "avg")
-    ? "Расход — заказ склада на текущий период (срез на пн) за две прошлые недели, его Δ — к неделе раньше. " : "";
+  const gap = (c) => (c.date ? `${c.name} — нет среза на ${ddmm(c.date)}` : `${c.name} — ${c.covered} из ${c.of} дн.`);
+  const spent = data.columns.some((c) => c.kind === "spent")
+    ? "Расход — заказ склада за две прошлые недели, как в «Динамике» (срез на пн следующей недели), его Δ — к неделе раньше. " : "";
   setCaption(
     `${data.period.label}. Значения в базовых единицах (шт, кг). Остатки — срез на начало периода и на начало следующего. Δ — ${data.period.compare}. ${spent}`,
     partial.length ? el("span", { class: "warn" }, `⚠ Неполные данные: ${partial.map(gap).join("; ")}`) : null,
@@ -342,10 +341,10 @@ function renderPivot() {
   const columns = [nameCol, unitCol, ...data.columns.map((s, i) => ({
     key: `s${s.key}`,
     label: s.name,
-    sub: s.date
-      ? `на ${ddmm(s.date)}${s.covered ? "" : " · нет данных"}`
-      : s.kind === "avg"
-        ? `${s.weeks.map(ddmm).join(", ")}${s.covered < s.of ? ` · ${s.covered}/${s.of} нед.` : ""}`
+    sub: s.week
+      ? `${ddmm(s.week.start)}–${ddmm(s.week.end)}${s.covered ? "" : " · нет данных"}`
+      : s.date
+        ? `на ${ddmm(s.date)}${s.covered ? "" : " · нет данных"}`
         : AGG[s.agg] + (s.covered < s.of ? ` · ${s.covered}/${s.of} дн.` : ""),
     subWarn: s.covered < s.of,
     num: true,

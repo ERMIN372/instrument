@@ -80,9 +80,9 @@ def _pivot_sheet(ws, table: dict, rows: list[dict]):
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
     ws["A2"] = (f"Δ — {period['compare']}. Остаток на начало — срез на первый день периода,"
                 " на конец — на первый день следующего.")
-    if any(c["kind"] == "avg" for c in table["columns"]):
-        ws["A2"] = (ws["A2"].value + " Расход — заказ склада на текущий период (срез на пн)"
-                    " за две прошлые недели, его Δ — к неделе раньше.")
+    if any(c["kind"] == "spent" for c in table["columns"]):
+        ws["A2"] = (ws["A2"].value + " Расход — заказ склада за две прошлые недели, как в «Динамике»"
+                    " (срез на пн следующей недели), его Δ — к неделе раньше.")
     ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
 
     labels = list(FIXED)
