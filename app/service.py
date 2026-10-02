@@ -224,6 +224,7 @@ def _coverage(conn, days: list[dt.date]) -> dict[int, int]:
 
 CURRENT, FUTURE = "на текущий период", "на будущий период"
 SPENT_WEEKS = 2  # расход в сводной — за столько недель до периода
+BUYERS_RE = re.compile(r"заказ\w* покуп", re.I)  # расход в сводной — по заказу покупателей
 
 
 def future_after_next(groups: list[tuple[list, list]]) -> list:
@@ -281,16 +282,16 @@ def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dic
     shift = len(days) * DAY if mode == "range" else WEEK
     prev_days = [d - shift for d in days]
     after = days[-1] + DAY
-    # Расход — заказ склада за две недели до недели начала периода, как во вкладке «Динамика»:
-    # неделя = срез на пн следующей. Период с 05.10 → нед. 39 (срез 28.09) и нед. 40 (05.10);
-    # Δ — к неделе раньше, поэтому грузим и 21.09.
+    # Расход — заказ покупателей за две недели до недели начала периода, как во вкладке
+    # «Динамика»: неделя свёрнута по способу источника (сумма за Пн–Вс). Период с 05.10 →
+    # нед. 39 (21–27.09) и нед. 40 (28.09–04.10); Δ — к неделе раньше, поэтому грузим и нед. 38.
     spent = [monday(days[0]) - (SPENT_WEEKS - i) * WEEK for i in range(SPENT_WEEKS)]
+    spent_days = date_range(spent[0] - WEEK, spent[-1] + WEEK)  # +день: срез «на конец»
 
     srcs = [s for s in sources(conn) if not s["hidden"]]
-    data, source_days = _load(conn, sorted({*days, *prev_days, after, after - shift,
-                                            *spent, *(w + WEEK for w in spent)}))
+    data, source_days = _load(conn, sorted({*days, *prev_days, after, after - shift, *spent_days}))
     items = _items(conn, {code for _, code in data})
-    coverage = _coverage(conn, days)
+    covered = _covered_days(conn, [*days, *spent_days])
 
     # (источник, ключ колонки, заголовок, вид, дни периода, дни пред. периода)
     # Заказ склада (end) — две колонки: на текущий период — срез на первый день периода
@@ -303,10 +304,10 @@ def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dic
                     [(s, str(s["id"]), f"{s['name']} {FUTURE}", "end", days, prev_days)])
         return [(s, str(s["id"]), s["name"], s["agg"], days, prev_days)], []
 
-    orders = [s for s in srcs if s["agg"] == "end"]
+    buyers = [s for s in srcs if BUYERS_RE.search(s["name"])]
 
-    def spent_name(s, label):  # заказ склада обычно один — тогда без имени источника
-        return f"Расход {label}" if len(orders) == 1 else f"{s['name']}: расход {label}"
+    def spent_name(s, label):  # заказ покупателей обычно один — тогда без имени источника
+        return f"Расход {label}" if len(buyers) == 1 else f"{s['name']}: расход {label}"
 
     cols = future_after_next([group(s) for s in srcs]) + [
         (s, f"{s['id']}c", s["close_label"], "close", [after], [after - shift])
@@ -314,7 +315,7 @@ def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dic
     ] + [  # расход по неделям — в самом конце, после остатков на конец
         (s, f"{s['id']}w{i}", spent_name(s, f"нед. {w.isocalendar()[1]}"), "spent",
          week_days(w), week_days(w - WEEK))
-        for s in orders for i, w in enumerate(spent)
+        for s in buyers for i, w in enumerate(spent)
     ]
 
     rows = []
@@ -333,13 +334,14 @@ def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dic
     columns = []
     for s, key, name, kind, cur_days, _old in cols:
         col = {"id": s["id"], "key": key, "name": name, "agg": s["agg"], "kind": kind}
-        if kind == "sum":
-            col.update(covered=coverage.get(s["id"], 0), of=len(days), date=None)
+        agg = "last" if kind == "current" else s["agg"]
+        if agg == "sum":  # сколько дней покрыто загруженными файлами
+            col.update(covered=len(covered[s["id"]] & set(cur_days)), of=len(cur_days), date=None)
         else:  # срез: есть ли у источника данные на нужный день
-            day = {"end": after, "spent": cur_days[-1] + DAY}.get(kind, cur_days[0])
+            day = cur_days[-1] + DAY if agg == "end" else cur_days[0]
             col.update(covered=int(day in source_days[s["id"]]), of=1, date=day.isoformat())
-            if kind == "spent":  # в заголовке — сама неделя, как в «Динамике»; date — день среза
-                col["week"] = week_info(cur_days[0])
+        if kind == "spent":  # в заголовке — сама неделя, как в «Динамике»
+            col["week"] = week_info(cur_days[0])
         columns.append(col)
 
     return {
