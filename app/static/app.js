@@ -5,7 +5,6 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const nf = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 const nfCompact = new Intl.NumberFormat("ru-RU", { notation: "compact", maximumFractionDigits: 1 });
 const pf = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" });
-const pct = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 0 });
 const AGG = { sum: "сумма", last: "остаток на начало", end: "на будущий период" };
 const TABLE_TABS = ["pivot", "rc", "auto", "days", "trend"];
 const RC_ROLES = { stock: "Остаток", order: "Заказ", output: "Выпуск", consumption: "Потребление" };
@@ -265,7 +264,7 @@ function grid(table, { columns, rows, view, onRowClick }) {
   const head = el("tr", {}, ...columns.map((c) => {
     const active = sort.key === c.key;
     const th = el("th", {
-      class: [c.sortable !== false ? "sortable" : "", c.sep ? "sep" : ""].join(" "),
+      class: [c.sortable !== false ? "sortable" : "", c.sep ? "sep" : "", c.thCls || ""].join(" "),
       "aria-sort": active ? (sort.dir === "asc" ? "ascending" : "descending") : null,
       title: c.sortable !== false ? "Сортировать" : null,
       onclick: c.sortable !== false ? () => {
@@ -405,81 +404,26 @@ function renderRc() {
   grid($("#rc-table"), { columns, rows: filterRows(data.rows), view: "rc", onRowClick: (r) => openDetail(r.code) });
 }
 
-// ---------- автозаказ (демо): формулы А–Г рядом с фактическим заказом склада ----------
-
-function renderAutoParams(data) {
-  const field = (key, label, attrs) => el("label", { class: "inline" }, label,
-    el("input", {
-      type: "number", class: "num-input", value: data.params[key], required: true, ...attrs,
-      onchange: async (e) => {
-        if (!e.target.checkValidity()) { e.target.reportValidity(); return; }
-        try {
-          await api("api/autoorder-settings", {
-            method: "PUT", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ [key]: Number(e.target.value) }),
-          });
-          load();
-        } catch (err) {
-          $("#caption").textContent = `Ошибка: ${err.message}`;
-        }
-      },
-    }));
-  $("#auto-params").replaceChildren(
-    field("cover_weeks", "Покрытие: остаток пн + заказ, нед. потребления:", { min: 0, max: 8, step: 0.5, "aria-label": "Покрытие, недель" }),
-    field("k", "k при σ (формула Г):", { min: 0, max: 3, step: 0.1, "aria-label": "k при сигме" }),
-    el("span", { class: "muted" }, "Параметры общие для всех. Источники — как во вкладке РЦ."));
-}
-
-function renderBacktest(data) {
-  const bt = data.backtest;
-  const weeks = bt.weeks.map((w) => w.iso.replace(/^\d+-W/, ""));
-  $("#auto-bt-note").replaceChildren(
-    el("b", {}, "Прогон по истории. "),
-    weeks.length
-      ? `Те же формулы на прошлых неделях (заказ на нед. ${weeks.join(", ")}) против фактического потребления: покрытие = (остаток пн + заказ) / потребление недели. Цель — не меньше ${nf.format(data.params.cover_weeks)} нед.; меньше 1 нед. — дефицит, к концу недели остаток в минусе.`
-      : el("span", { class: "warn" }, "⚠ Нет прошедших недель с полными данными — прогонять не на чем, загрузи историю потребления и остатков."));
-  if (!weeks.length) { $("#auto-backtest").replaceChildren(); return; }
-  const cols = [
-    ["Формула", (x) => x.label],
-    ["Товаро-недель", (x) => fmt(x.n)],
-    ["Покрытие не ниже цели", (x) => (isNil(x.hit) ? "—" : pct.format(x.hit))],
-    ["Дефицит (покрытие < 1)", (x) => (isNil(x.short) ? "—" : pct.format(x.short))],
-    ["Медиана покрытия, нед.", (x) => fmt(x.cover)],
-  ];
-  $("#auto-backtest").replaceChildren(
-    el("thead", {}, el("tr", {}, ...cols.map(([h], i) => el("th", { class: i ? "num" : "" }, h)))),
-    el("tbody", {}, ...bt.rows.map((x) => el("tr", { class: x.key === "fact" ? "muted" : "" },
-      ...cols.map(([, get], i) => el("td", { class: i ? "num" : "" }, get(x)))))));
-}
+// ---------- автозаказ (демо): по каждой формуле — заказ и «почему так» ----------
 
 function renderAuto() {
   const data = state.data.auto;
   if (!data) return;
   renderCategories(data.rows);
-  renderAutoParams(data);
-  renderBacktest(data);
-  const unset = Object.keys(RC_ROLES).filter((r) => !data.roles[r]).map((r) => RC_ROLES[r].toLowerCase());
-  const warns = data.columns.filter((c) => c.warn).map((c) => `${c.label.toLowerCase()} ${c.sub} — ${c.warn}`);
   setCaption(
     el("b", {}, "Демо-версия — пока тестируем. "),
-    `${data.period.label}. Заказ = ${nf.format(data.params.cover_weeks)} × потребление в неделю − остаток пн (расчёт, как во вкладке РЦ), не меньше 0: остаток пн + заказ = ${nf.format(data.params.cover_weeks)} нед. потребления; `
-      + "от 1 000 — до сотен, от 100 — до десятков. "
-      + `Потребление — «${data.roles.consumption?.name ?? "не выбрано"}», неполные недели не в расчёте. `,
-    unset.length ? el("span", { class: "warn" }, `⚠ Не выбран источник: ${unset.join(", ")}. `) : null,
-    warns.length ? el("span", { class: "warn" }, `⚠ ${warns.join("; ")}`) : null,
+    `${data.period.label}. Заказ = ${nf.format(data.params.cover_weeks)} × расход в неделю − остаток на пн, округление до сотен. `,
+    data.warnings.length ? el("span", { class: "warn" }, `⚠ ${data.warnings.join("; ")}`) : null,
   );
-  const columns = [nameCol, unitCol, ...data.columns.map((c, i) => ({
-    key: c.key,
-    label: c.label,
-    sub: c.sub + (c.warn ? ` · ${c.warn}` : ""),
-    subWarn: !!c.warn,
-    num: true,
-    sep: i === 0 || c.role !== data.columns[i - 1].role,
-    cls: c.role === "formula" || c.role === "stock" ? "strong" : "",
-    get: (r) => r.values[i],
-    render: (r) => fmt(r.values[i]),
-    total: c.key === "sigma" ? null : (rows) => fmt(sum(rows.map((r) => r.values[i]))),  // σ не складываем
-  }))];
+  // Только номенклатура и пары «заказ — почему»: остатки и расход есть на других вкладках.
+  const name = { ...nameCol, render: (r) => [r.name, el("span", { class: "code" }, `${r.code} · ${r.unit}`)] };
+  const columns = [name, ...data.formulas.flatMap((f, i) => [
+    { key: f.key, label: f.label, sub: "заказ", num: true, sep: true, cls: "strong",
+      get: (r) => r.offers[i].value, render: (r) => fmt(r.offers[i].value),
+      total: (rows) => fmt(sum(rows.map((r) => r.offers[i].value))) },
+    { key: `${f.key}-why`, label: "почему", sortable: false, cls: "why", thCls: "why",
+      get: (r) => r.offers[i].why, render: (r) => r.offers[i].why },
+  ])];
   grid($("#auto-table"), { columns, rows: filterRows(data.rows), view: "auto", onRowClick: (r) => openDetail(r.code) });
 }
 
@@ -552,7 +496,7 @@ async function load() {
   if (!TABLE_TABS.includes(state.tab)) return;
   if (!state.meta.days.length) {
     $("#caption").textContent = "Данных пока нет — загрузи xlsx на вкладке «Загрузка».";
-    for (const t of ["#pivot-table", "#rc-table", "#auto-table", "#auto-backtest", "#days-table", "#trend-table"]) $(t).replaceChildren();
+    for (const t of ["#pivot-table", "#rc-table", "#auto-table", "#days-table", "#trend-table"]) $(t).replaceChildren();
     return;
   }
   try {

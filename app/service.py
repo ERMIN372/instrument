@@ -621,54 +621,85 @@ def hist_stats(hist: list) -> tuple[float | None, float | None]:
     return statistics.fmean(vals), statistics.stdev(vals) if len(vals) > 1 else 0.0
 
 
-def auto_orders(hist: list, stock: float | None, cover_weeks: float, k: float) -> list:
-    """Заказ на следующую неделю по формулам А–Г: покрытие × потребление в неделю − остаток пн,
-    у Г ещё + k·σ; не меньше нуля, с округлением. Остаток пн + заказ = покрытие × потребление.
+def auto_rates(hist: list, k: float) -> list:
+    """Расход в неделю по формулам А–Г: (расход, добавка — у Г k·σ, сколько недель в расчёте).
     hist — потребление за AUTO_WEEKS прошлых недель от старой к свежей, None — неделя загружена
-    не целиком и в расчёт не идёт. Нет остатка или истории — None."""
-    if stock is None:
-        return [None] * len(AUTO_FORMULAS)
+    не целиком и в расчёт не идёт. Нет истории — None."""
     last = [(w, v) for w, v in zip(AUTO_WEIGHTS, hist[-3:]) if v is not None]
     vals = [v for _, v in last]
     mean, sigma = hist_stats(hist)
-    rates = [  # (потребление в неделю, добавка к запасу)
-        (sum(vals) / len(vals), 0) if vals else None,
-        (sum(w * v for w, v in last) / sum(w for w, _ in last), 0) if vals else None,
-        (max(vals), 0) if vals else None,
-        (mean, k * sigma) if mean is not None else None,
+    n8 = sum(v is not None for v in hist)
+    return [
+        (sum(vals) / len(vals), 0, len(vals)) if vals else None,
+        (sum(w * v for w, v in last) / sum(w for w, _ in last), 0, len(vals)) if vals else None,
+        (max(vals), 0, len(vals)) if vals else None,
+        (mean, k * sigma, n8) if mean is not None else None,
     ]
-    return [None if r is None else round_order(max(0, cover_weeks * r[0] + r[1] - stock)) for r in rates]
+
+
+def auto_orders(hist: list, stock: float | None, cover_weeks: float, k: float) -> list:
+    """Заказ на следующую неделю по формулам А–Г: покрытие × расход в неделю − остаток пн, у Г
+    ещё + k·σ; не меньше нуля, с округлением. Остаток пн + заказ = покрытие × расход.
+    Нет остатка или истории — None."""
+    if stock is None:
+        return [None] * len(AUTO_FORMULAS)
+    return [None if r is None else round_order(max(0, cover_weeks * r[0] + r[1] - stock))
+            for r in auto_rates(hist, k)]
 
 
 def _num(x: float) -> str:
-    return f"{x:g}".replace(".", ",")
+    """Число в подписи: от 100 — целое с пробелами по тысячам (1 033), меньше — с десятой (11,7)."""
+    s = f"{x:,.0f}" if abs(x) >= 100 else f"{x:.1f}".rstrip("0").rstrip(".")
+    return s.replace(",", "\u00a0").replace(".", ",")
+
+
+def auto_offers(hist: list, stock: float | None, cover_weeks: float, k: float, wed: dt.date) -> list[dict]:
+    """Предложение по формулам А–Г и «почему так» — одной строкой с цифрами расчёта."""
+    out = []
+    for r, order, full in zip(auto_rates(hist, k), auto_orders(hist, stock, cover_weeks, k), (3, 3, 3, AUTO_WEEKS)):
+        if stock is None:
+            why = f"нет остатка на ср {wed:%d.%m}"
+        elif r is None:
+            why = "нет расхода за прошлые недели"
+        elif cover_weeks * r[0] + r[1] <= stock:
+            why = f"остатка {_num(stock)} хватает, нужно {_num(cover_weeks * r[0] + r[1])}"
+        else:
+            rate, extra, n = r
+            why = f"расход {_num(rate)}" + (f" (за {n} нед.)" if n < full else "") + f" × {_num(cover_weeks)}"
+            if extra:
+                why += f" + разброс {_num(extra)}"
+            why += f" − остаток {_num(stock)}" if stock >= 0 else f" + минус на складе {_num(-stock)}"
+        out.append({"value": order, "why": why})
+    return out
 
 
 def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
-    """Автозаказ (демо): сколько заказать складу на следующую неделю — четыре формулы рядом
-    с фактическим «Заказом склада» (первый источник со способом end). Считаем в среду, как
-    во вкладке РЦ, и её же источниками: неделя 21–27.09 → остаток на пн 28.09 = ост. 23.09 −
-    заказ 23–27.09 + выпуск 23–27.09, заказ — на неделю 28.09–04.10, потребление — прошлые
-    недели (А–В — три, Г — восемь), неполные недели не в счёт.
-    Прогон по истории: те же формулы на AUTO_WEEKS прошлых неделях против потребления недели,
-    на которую заказывали: покрытие = (остаток пн + заказ) / потребление, меньше 1 — к концу
+    """Автозаказ (демо): сколько заказать складу на следующую неделю по четырём формулам —
+    на экране только предложение и «почему так». Считаем в среду, как во вкладке РЦ, и её же
+    источниками: неделя 21–27.09 → остаток на пн 28.09 = ост. 23.09 − заказ 23–27.09 + выпуск
+    23–27.09, заказ — на неделю 28.09–04.10, расход — прошлые недели (А–В — три, Г — восемь),
+    неполные недели не в счёт.
+    Прогон по истории (только в xlsx): те же формулы на AUTO_WEEKS прошлых неделях против
+    потребления недели, на которую заказывали, и рядом — фактический «Заказ склада» (первый
+    источник со способом end): покрытие = (остаток пн + заказ) / потребление, меньше 1 — к концу
     недели остаток в минусе. Берём только прошедшие недели — на будущие 1С отдаёт заказы
     покупателей не целиком."""
     today = today or dt.date.today()
     start = monday(date)
     nxt = start + WEEK
+    wed = rc_days(start)[0]
     roles = rc_settings(conn)
     params = auto_settings(conn)
     srcs = sources(conn)
     by_id = {s["id"]: s for s in srcs}
     wh = next((s for s in srcs if s["agg"] == "end"), None)
     first = start - 2 * AUTO_WEEKS * WEEK  # история для самой старой недели прогона
-    days = date_range(first, nxt + 6 * DAY)
+    days = date_range(first, start + 6 * DAY)
     data, source_days = _load(conn, days)
     cons_sid = roles["consumption"]
     cons_agg = by_id[cons_sid]["agg"] if cons_sid else "sum"
     cons_days = _covered_days(conn, days).get(cons_sid, set())
-    full = {w for w in (first + i * WEEK for i in range(2 * AUTO_WEEKS + 2))
+    full = {w for w in (first + i * WEEK for i in range(2 * AUTO_WEEKS + 1))
             if all(d in cons_days for d in week_days(w))}
 
     def cells(sid, code):
@@ -694,18 +725,15 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
             return None
         return cells(wh["id"], code).get(w + WEEK, 0)
 
-    used = {sid for sid in roles.values() if sid} | ({wh["id"]} if wh else set())
+    used = {sid for sid in roles.values() if sid}
     items = _items(conn, {code for sid, code in data if sid in used})
     cw, k = params["cover_weeks"], params["k"]
 
     rows = []
     for code, item in items.items():
-        h = hist(code, start)
-        o = stock(code, start)
-        known = aggregate(cons_agg, cells(cons_sid, code), week_days(nxt)) if cons_sid else None
-        values = [*h[-3:], *hist_stats(h), o, known, fact(code, start), *auto_orders(h, o, cw, k)]
-        if any(v is not None for v in values):
-            rows.append({**_item_row(item), "values": values})
+        h, o = hist(code, start), stock(code, start)
+        if any(h) or o:  # ни расхода, ни остатка — нечего предлагать
+            rows.append({**_item_row(item), "offers": auto_offers(h, o, cw, k, wed)})
 
     # Прогон: недели до выбранной, у которых следующая (на неё и заказывали) уже прошла и загружена.
     tested = [w for w in (start - (AUTO_WEEKS - i) * WEEK for i in range(AUTO_WEEKS))
@@ -728,33 +756,14 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
                 "short": sum(x < 1 for x in c) / len(c) if c else None,
                 "cover": statistics.median(c) if c else None}
 
-    wed, _, close = rc_days(start)
-    m = _num(cw)
-    formula_subs = [f"{m} × ср. − остаток", f"{m} × взвеш. − остаток", f"{m} × макс. − остаток",
-                    f"{m} × ср. + {_num(k)}σ − остаток"]
-    full8 = sum(start - (AUTO_WEEKS - i) * WEEK in full for i in range(AUTO_WEEKS))
+    warnings = []
+    if not cons_sid:
+        warnings.append("не выбран источник потребления — во вкладке РЦ")
+    elif (n := sum(start - i * WEEK in full for i in (1, 2, 3))) < 3:
+        warnings.append(f"расход целиком загружен только за {n} из 3 прошлых нед.")
+    if not roles["stock"] or wed not in source_days[roles["stock"]]:
+        warnings.append(f"нет остатка на ср {wed:%d.%m}")
 
-    def span(w):
-        return f"{w:%d.%m}–{w + 6 * DAY:%d.%m}"
-
-    columns = [
-        {"key": f"p{i}", "role": "consumption", "label": f"Потребл. нед. {w.isocalendar()[1]}", "sub": span(w),
-         "warn": None if w in full else "неполная, не в расчёте"}
-        for i, w in enumerate(start - (3 - i) * WEEK for i in range(3))
-    ] + [
-        {"key": "mean", "role": "stats", "label": f"Ср. {AUTO_WEEKS} нед.", "sub": f"полных {full8}/{AUTO_WEEKS}",
-         "warn": None if full8 >= 4 else "мало истории"},
-        {"key": "sigma", "role": "stats", "label": "Разброс σ", "sub": f"{AUTO_WEEKS} нед.", "warn": None},
-        {"key": "stock", "role": "stock", "label": "Остаток расчёт", "sub": day_info(close)["short"],
-         "warn": None if roles["stock"] and wed in source_days[roles["stock"]] else f"нет остатка на {wed:%d.%m}"},
-        {"key": "known", "role": "known", "label": f"Уже в 1С на нед. {nxt.isocalendar()[1]}", "sub": span(nxt),
-         "warn": None},
-        {"key": "fact", "role": "fact", "label": wh["name"] if wh else "Заказ склада", "sub": f"факт на {close:%d.%m}",
-         "warn": None if wh and close in source_days[wh["id"]] else "нет данных"},
-    ] + [
-        {"key": key, "role": "formula", "label": label, "sub": sub, "warn": None}
-        for (key, label), sub in zip(AUTO_FORMULAS, formula_subs)
-    ]
     return {
         "period": {
             **week_info(start),
@@ -763,7 +772,8 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
         "roles": {role: {"id": sid, "name": by_id[sid]["name"]} if sid else None for role, sid in roles.items()},
         "warehouse": {"id": wh["id"], "name": wh["name"]} if wh else None,
         "params": params,
-        "columns": columns,
+        "formulas": [{"key": key, "label": label} for key, label in AUTO_FORMULAS],
+        "warnings": warnings,
         "rows": _sort(rows),
         "backtest": {
             "weeks": [week_info(w + WEEK) for w in tested],

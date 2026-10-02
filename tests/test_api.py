@@ -511,27 +511,19 @@ def test_autoorder_formulas_and_backtest(client):
     t = client.get("/api/autoorder", params={"date": "2026-09-23"}).json()
     assert t["period"]["label"] == "Ср 23.09 → заказ на нед. 40 · 28.09–04.10.2026"
     assert t["params"] == {"cover_weeks": 2, "k": 1}
-    assert t["warehouse"]["name"] == "Заказ склада"
-    assert [(c["label"], c["sub"], c["warn"]) for c in t["columns"]] == [
-        ("Потребл. нед. 36", "31.08–06.09", None), ("Потребл. нед. 37", "07.09–13.09", None),
-        ("Потребл. нед. 38", "14.09–20.09", None), ("Ср. 8 нед.", "полных 8/8", None),
-        ("Разброс σ", "8 нед.", None), ("Остаток расчёт", "Пн 28.09", None),
-        ("Уже в 1С на нед. 40", "28.09–04.10", None), ("Заказ склада", "факт на 28.09", None),
-        ("А · среднее 3 нед.", "2 × ср. − остаток", None), ("Б · взвешенное 3 нед.", "2 × взвеш. − остаток", None),
-        ("В · максимум 3 нед.", "2 × макс. − остаток", None), ("Г · среднее 8 нед. + σ", "2 × ср. + 1σ − остаток", None),
-    ]
+    assert t["warnings"] == []
+    assert [f["label"] for f in t["formulas"]] == [
+        "А · среднее 3 нед.", "Б · взвешенное 3 нед.", "В · максимум 3 нед.", "Г · среднее 8 нед. + σ"]
     hist = weekly[:8]
     mean, sigma = statistics.fmean(hist), statistics.stdev(hist)
     stock = 50 - 5 * 14 + 5 * 15  # 55: остаток ср − заказ Ср–Вс + выпуск Ср–Вс, как во вкладке РЦ
     (row,) = t["rows"]
-    assert row["values"][:3] == [63, 70, 84]
-    assert row["values"][3:5] == [pytest.approx(mean), pytest.approx(sigma)]
-    assert row["values"][5:8] == [stock, 40, 220]
-    assert row["values"][8:] == [
-        90,                              # 2 × 72,3 − 55 = 89,7
-        96,                              # 2 × (0,2·63 + 0,3·70 + 0,5·84) − 55 = 96,2
-        110,                             # 2 × 84 − 55 = 113, от 100 — до десятков
-        round(2 * mean + sigma - stock),  # 97,6
+    assert row["offers"] == [
+        {"value": 90, "why": "расход 72,3 × 2 − остаток 55"},           # 2 × 72,3 − 55 = 89,7
+        {"value": 96, "why": "расход 75,6 × 2 − остаток 55"},           # 2 × (0,2·63 + 0,3·70 + 0,5·84) − 55
+        {"value": 110, "why": "расход 84 × 2 − остаток 55"},            # 113, от 100 — до десятков
+        {"value": round(2 * mean + sigma - stock),
+         "why": f"расход 71,8 × 2 + разброс {sigma:.1f} − остаток 55".replace(".", ",")},
     ]
 
     # Прогон: остаток на среду есть только у недель 37 и 38 — по две товаро-недели на формулу.
@@ -554,17 +546,24 @@ def test_autoorder_formulas_and_backtest(client):
         conn.execute("""INSERT INTO settings (key, value) VALUES ('autoorder', '{"stock_weeks": 5}')""")
     assert client.get("/api/autoorder", params={"date": "2026-09-23"}).json()["params"] == {"cover_weeks": 2, "k": 1}
 
-    # Параметры общие и сохраняются; покрытие 1 нед.: 72,3 − 55 = 17.
+    # Параметры общие и сохраняются; покрытие 1 нед.: 72,3 − 55 = 17, а у Г остатка уже хватает.
     assert client.put("/api/autoorder-settings", json={"cover_weeks": 1}).json() == {"cover_weeks": 1, "k": 1}
     t = client.get("/api/autoorder", params={"date": "2026-09-23"}).json()
-    assert t["rows"][0]["values"][8] == 17
-    assert t["columns"][8]["sub"] == "1 × ср. − остаток"
+    assert t["rows"][0]["offers"][0] == {"value": 17, "why": "расход 72,3 × 1 − остаток 55"}
     assert client.put("/api/autoorder-settings", json={"cover_weeks": 20}).status_code == 422
+
+    # Остатка на среду нет — предлагать не из чего, так и пишем.
+    t = client.get("/api/autoorder", params={"date": "2026-09-30"}).json()
+    assert t["warnings"] == ["нет остатка на ср 30.09"]
+    assert {o["why"] for o in t["rows"][0]["offers"]} == {"нет остатка на ср 30.09"}
 
     r = client.get("/api/export-autoorder.xlsx", params={"date": "2026-09-23"})
     wb = load_workbook(io.BytesIO(r.content))
     assert wb.sheetnames == ["Автозаказ (демо)", "Прогон по истории"]
     ws = wb["Автозаказ (демо)"]
-    assert "демо" in ws["A1"].value and ws["M4"].value == "А · среднее 3 нед. · 1 × ср. − остаток"
-    assert ws["M5"].value == 17
+    assert "демо" in ws["A1"].value
+    assert [ws.cell(row=4, column=c).value for c in (5, 6, 11, 12)] == [
+        "А · среднее 3 нед. · заказ", "А · среднее 3 нед. · почему", "Г · среднее 8 нед. + σ · заказ",
+        "Г · среднее 8 нед. + σ · почему"]
+    assert (ws["E5"].value, ws["F5"].value) == (17, "расход 72,3 × 1 − остаток 55")
     assert wb["Прогон по истории"]["A9"].value == "Как заказали: Заказ склада"
