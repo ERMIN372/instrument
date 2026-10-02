@@ -10,7 +10,7 @@ import psycopg
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from . import db, export, mail_import, service
@@ -283,6 +283,32 @@ def export_rc_xlsx(date: str | None = None, category: str | None = None, q: str 
     with db.pool.connection() as conn:
         table = service.rc(conn, _date(date, conn))
     return _xlsx(export.rc_workbook(table, category, q), f"instrument_rc_{table['period']['iso']}.xlsx")
+
+
+@app.get("/api/autoorder")
+def autoorder(date: str | None = None):
+    with db.pool.connection() as conn:
+        return service.autoorder(conn, _date(date, conn))
+
+
+class AutoSettings(BaseModel):
+    stock_weeks: float | None = Field(None, ge=0, le=8)
+    k: float | None = Field(None, ge=0, le=3)
+
+
+@app.put("/api/autoorder-settings")
+def autoorder_settings(body: AutoSettings):
+    """Параметры автозаказа: запас на конец недели в неделях потребления и k для σ (общая настройка)."""
+    with db.pool.connection() as conn:
+        service.save_auto_settings(conn, body.model_dump(exclude_unset=True, exclude_none=True))
+        return service.auto_settings(conn)
+
+
+@app.get("/api/export-autoorder.xlsx")
+def export_autoorder_xlsx(date: str | None = None, category: str | None = None, q: str | None = None):
+    with db.pool.connection() as conn:
+        table = service.autoorder(conn, _date(date, conn))
+    return _xlsx(export.autoorder_workbook(table, category, q), f"instrument_autoorder_{table['period']['iso']}.xlsx")
 
 
 @app.get("/api/export.xlsx")
