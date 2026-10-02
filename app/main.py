@@ -98,6 +98,16 @@ def _period(mode: str, date: str | None, date_to: str | None, conn) -> tuple[dt.
     return start, end
 
 
+def _span(date: str | None, date_to: str | None, conn) -> tuple[dt.date, dt.date | None]:
+    """Неделя даты или, с date_to, произвольный период — для вкладок без режима «День»."""
+    return _period("range" if date_to else "week", date, date_to, conn)
+
+
+def _slug(period: dict) -> str:
+    """Период в имени файла: неделя, день или «начало_конец»."""
+    return period.get("iso") or period.get("date") or f"{period['start']}_{period['end']}"
+
+
 def _found(value, what: str):
     if value is None:
         raise HTTPException(404, f"Нет такого: {what}")
@@ -240,14 +250,19 @@ def pivot(mode: str = "week", date: str | None = None, date_to: str | None = Non
 @app.get("/api/by-days")
 def by_days(source_id: int, date: str | None = None, date_to: str | None = None):
     with db.pool.connection() as conn:
-        start, end = _period("range" if date_to else "week", date, date_to, conn)
+        start, end = _span(date, date_to, conn)
         return _found(service.by_days(conn, start, source_id, end), "источник")
 
 
 @app.get("/api/trend")
-def trend(source_id: int, end: str | None = None, count: int = 8):
+def trend(source_id: int, end: str | None = None, count: int = 8,
+          date: str | None = None, date_to: str | None = None):
+    """Последние count недель до end или, с date и date_to, недели, которые задевает период."""
     count = max(2, min(count, 52))
     with db.pool.connection() as conn:
+        if date_to:
+            start, stop = _period("range", date, date_to, conn)
+            return _found(service.trend(conn, stop, count, source_id, start), "источник")
         return _found(service.trend(conn, _date(end, conn), count, source_id), "источник")
 
 
@@ -258,9 +273,9 @@ def item(code: str, date: str | None = None):
 
 
 @app.get("/api/rc")
-def rc(date: str | None = None):
+def rc(date: str | None = None, date_to: str | None = None):
     with db.pool.connection() as conn:
-        return service.rc(conn, _date(date, conn))
+        return service.rc(conn, *_span(date, date_to, conn))
 
 
 class RcSettings(BaseModel):
@@ -279,16 +294,18 @@ def rc_settings(body: RcSettings):
 
 
 @app.get("/api/export-rc.xlsx")
-def export_rc_xlsx(date: str | None = None, category: str | None = None, q: str | None = None):
+def export_rc_xlsx(date: str | None = None, date_to: str | None = None,
+                   category: str | None = None, q: str | None = None):
     with db.pool.connection() as conn:
-        table = service.rc(conn, _date(date, conn))
-    return _xlsx(export.rc_workbook(table, category, q), f"instrument_rc_{table['period']['iso']}.xlsx")
+        table = service.rc(conn, *_span(date, date_to, conn))
+    return _xlsx(export.rc_workbook(table, category, q), f"instrument_rc_{_slug(table['period'])}.xlsx")
 
 
 @app.get("/api/autoorder")
-def autoorder(date: str | None = None):
+def autoorder(date: str | None = None, date_to: str | None = None):
     with db.pool.connection() as conn:
-        return service.autoorder(conn, _date(date, conn))
+        start, end = _span(date, date_to, conn)
+        return service.autoorder(conn, start, date_to=end)
 
 
 class AutoSettings(BaseModel):
@@ -305,10 +322,12 @@ def autoorder_settings(body: AutoSettings):
 
 
 @app.get("/api/export-autoorder.xlsx")
-def export_autoorder_xlsx(date: str | None = None, category: str | None = None, q: str | None = None):
+def export_autoorder_xlsx(date: str | None = None, date_to: str | None = None,
+                          category: str | None = None, q: str | None = None):
     with db.pool.connection() as conn:
-        table = service.autoorder(conn, _date(date, conn))
-    return _xlsx(export.autoorder_workbook(table, category, q), f"instrument_autoorder_{table['period']['iso']}.xlsx")
+        start, end = _span(date, date_to, conn)
+        table = service.autoorder(conn, start, date_to=end)
+    return _xlsx(export.autoorder_workbook(table, category, q), f"instrument_autoorder_{_slug(table['period'])}.xlsx")
 
 
 @app.get("/api/export.xlsx")
@@ -320,9 +339,7 @@ def export_xlsx(mode: str = "week", date: str | None = None, date_to: str | None
         ids = dict.fromkeys(c["id"] for c in table["columns"])  # остаток даёт 2 колонки, лист — один
         days = [service.by_days(conn, day, sid, end) for sid in ids]
     content = export.workbook(table, days, category, q)
-    p = table["period"]
-    period = p.get("iso") or p.get("date") or f"{p['start']}_{p['end']}"
-    return _xlsx(content, f"instrument_{period}.xlsx")
+    return _xlsx(content, f"instrument_{_slug(table['period'])}.xlsx")
 
 
 def _xlsx(content: bytes, fname: str) -> Response:

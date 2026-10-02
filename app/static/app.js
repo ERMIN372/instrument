@@ -12,9 +12,9 @@ const BUYERS_RE = /заказ\S* покуп/i;  // «Динамика» по у�
 
 const state = {
   tab: "pivot",
-  mode: "week",       // сводная: неделя, день или произвольный период
+  mode: "week",       // неделя, день (только сводная) или произвольный период — общий для всех вкладок
   date: null,         // якорная дата (ISO), неделя = неделя этой даты
-  range: null,        // сводная, режим «Период»: { from, to } (ISO, включительно)
+  range: null,        // режим «Период»: { from, to } (ISO, включительно)
   category: "",
   q: "",
   source: { days: null, trend: null },  // источник «По дням» и «Динамики» — у каждой вкладки свой
@@ -97,15 +97,18 @@ function loadPrefs() {
 
 // ---------- периоды ----------
 
+// Режим вкладки: «День» есть только у сводной, на остальных он читается как неделя.
+const tabMode = () => (state.tab === "pivot" || state.mode !== "day" ? state.mode : "week");
+
 function periodOptions() {
-  const byWeek = state.tab !== "pivot" || state.mode === "week";
+  const byWeek = tabMode() !== "day";
   return byWeek
     ? state.meta.weeks.map((w) => ({ value: w.start, label: w.label }))
     : state.meta.days.map((d) => ({ value: d.date, label: d.label }));
 }
 
 function currentPeriodValue() {
-  const byWeek = state.tab !== "pivot" || state.mode === "week";
+  const byWeek = tabMode() !== "day";
   return byWeek ? monday(state.date) : state.date;
 }
 
@@ -138,8 +141,8 @@ function lastDayInWeek(start) {
   return d ? d.date : start;
 }
 
-const isRange = () => state.tab === "pivot" && state.mode === "range";
-const pivotPeriod = () => (isRange() ? { date: state.range.from, date_to: state.range.to } : { date: state.date });
+const isRange = () => TABLE_TABS.includes(state.tab) && state.mode === "range";
+const periodParams = () => (isRange() ? { date: state.range.from, date_to: state.range.to } : { date: state.date });
 
 // Период по умолчанию — неделя, на которой стоял пользователь.
 function ensureRange() {
@@ -186,7 +189,7 @@ function stepPeriod(dir) {
   const idx = opts.findIndex((o) => o.value === currentPeriodValue());
   const next = opts[idx - dir];  // список отсортирован от новых к старым
   if (!next) return;
-  state.date = state.tab === "pivot" && state.mode === "day" ? next.value : lastDayInWeek(next.value);
+  state.date = tabMode() === "day" ? next.value : lastDayInWeek(next.value);
   load();
 }
 
@@ -197,23 +200,25 @@ function renderFilters() {
   $("#filters").hidden = !tableTab;
   $("#caption").hidden = !tableTab;
   if (!tableTab) return;
-  $("#mode-toggle").hidden = state.tab !== "pivot";
-  for (const b of $$("#mode-toggle button")) b.setAttribute("aria-pressed", String(b.dataset.mode === state.mode));
+  const mode = tabMode();
+  const range = isRange();
+  for (const b of $$("#mode-toggle button")) {
+    b.hidden = b.dataset.mode === "day" && state.tab !== "pivot";
+    b.setAttribute("aria-pressed", String(b.dataset.mode === mode));
+  }
   $("#source-select").hidden = ["pivot", "rc", "auto"].includes(state.tab);
-  $("#count-wrap").hidden = state.tab !== "trend";
+  $("#count-wrap").hidden = state.tab !== "trend" || range;  // в «Периоде» недели задаёт сам период
   $("#trend-count").value = String(state.trendCount);
 
   const srcSel = $("#source-select");
   srcSel.replaceChildren(...state.meta.sources.map((s) => el("option", { value: s.id }, s.name)));
   if (state.source[state.tab]) srcSel.value = String(state.source[state.tab]);
 
-  const mode = state.tab === "pivot" ? state.mode : "week";
-  const range = isRange();
   if (range) ensureRange();
   const own = { rc: "export-rc", auto: "export-autoorder" }[state.tab];  // у вкладок РЦ и автозаказа своя выгрузка
   $("#export").href = own
-    ? `api/${own}.xlsx${qs({ date: state.date, category: state.category, q: state.q })}`
-    : `api/export.xlsx${qs({ mode, ...pivotPeriod(), category: state.category, q: state.q })}`;
+    ? `api/${own}.xlsx${qs({ ...periodParams(), category: state.category, q: state.q })}`
+    : `api/export.xlsx${qs({ mode, ...periodParams(), category: state.category, q: state.q })}`;
   $("#export").hidden = state.tab === "trend";
   $("#period-nav").hidden = range;
   $("#range-form").hidden = !range;
@@ -384,7 +389,7 @@ function renderRc() {
   const gap = (c) => `${c.label.toLowerCase()} ${c.sub}${c.of > 1 ? ` (${c.covered}/${c.of} дн.)` : ""}`;
   const unset = Object.keys(RC_ROLES).filter((r) => !data.roles[r]).map((r) => RC_ROLES[r].toLowerCase());
   setCaption(
-    `${data.period.label}. Остаток ср — из 1С, остаток пн — расчёт: остаток ср − заказ Ср–Вс + выпуск Ср–Вс. Потребление — за 3 прошлые недели. В базовых единицах (шт, кг). `,
+    `${data.period.label}. ${data.note} В базовых единицах (шт, кг). `,
     unset.length ? el("span", { class: "warn" }, `⚠ Не выбран источник: ${unset.join(", ")}. `) : null,
     missing.length ? el("span", { class: "warn" }, `⚠ Нет данных: ${missing.map(gap).join(", ")}`) : null,
   );
@@ -439,17 +444,20 @@ function renderDays() {
   const data = state.data.days;
   if (!data) return;
   renderCategories(data.rows);
-  const cov = data.covered < 7 ? el("span", { class: "warn" }, ` ⚠ данные за ${data.covered} из 7 дн.`) : null;
+  const n = data.days.length;
+  const week = Boolean(data.period.iso);  // иначе — произвольный период
+  const [totalH, prevH] = week ? ["Итого нед.", "Пред. нед."] : ["Итого", "Пред. период"];
+  const cov = data.covered < n ? el("span", { class: "warn" }, ` ⚠ данные за ${data.covered} из ${n} дн.`) : null;
   setCaption(
-    `${data.source.name} · ${data.period.label}. «Итого нед.» — ${AGG[data.source.agg]}. Δ — к пред. неделе.`, cov);
+    `${data.source.name} · ${data.period.label}. «${totalH}» — ${AGG[data.source.agg]}. Δ — ${week ? "к пред. неделе" : data.period.compare}.`, cov);
   const columns = [nameCol, unitCol,
     ...data.days.map((d, i) => ({
       key: `d${i}`, label: d.short, num: true,
       get: (r) => r.days[i], render: (r) => fmt(r.days[i]), total: (rows) => fmt(sum(rows.map((r) => r.days[i]))),
     })),
-    { key: "total", label: "Итого нед.", sub: AGG[data.source.agg], num: true, sep: true, cls: "strong",
+    { key: "total", label: totalH, sub: AGG[data.source.agg], num: true, sep: true, cls: "strong",
       get: (r) => r.total, render: (r) => fmt(r.total), total: (rows) => fmt(sum(rows.map((r) => r.total))) },
-    { key: "prev", label: "Пред. нед.", num: true, get: (r) => r.prev, render: (r) => fmt(r.prev),
+    { key: "prev", label: prevH, num: true, get: (r) => r.prev, render: (r) => fmt(r.prev),
       total: (rows) => fmt(sum(rows.map((r) => r.prev))) },
     { key: "delta", label: "Δ", num: true, get: (r) => r.delta, render: (r) => deltaNode(r.delta, r.prev) || "—",
       total: (rows) => {
@@ -473,7 +481,8 @@ function renderTrend() {
   const w = data.weeks.slice(first);
   const rows = data.rows.map((r) => ({ ...r, values: r.values.slice(first) }));
   setCaption(
-    `${data.source.name} · ${AGG[data.source.agg]} по неделям, ${w[0].label} — ${w.at(-1).label}.`);
+    `${data.source.name} · ${AGG[data.source.agg]} по неделям, ${w[0].label} — ${w.at(-1).label}.`,
+    data.period ? ` Период ${data.period.label}: недели, которые он задевает, — целиком, Пн–Вс.` : null);
   const columns = [nameCol, unitCol,
     ...w.map((wk, i) => ({
       key: `w${i}`, label: wk.iso.replace(/^\d+-/, ""), sub: `${wk.start.slice(8, 10)}.${wk.start.slice(5, 7)}`,
@@ -506,16 +515,18 @@ async function load() {
     return;
   }
   try {
+    const period = periodParams();
     if (state.tab === "pivot") {
-      state.data.pivot = await api(`api/pivot${qs({ mode: state.mode, ...pivotPeriod() })}`);
+      state.data.pivot = await api(`api/pivot${qs({ mode: state.mode, ...period })}`);
     } else if (state.tab === "rc") {
-      state.data.rc = await api(`api/rc${qs({ date: state.date })}`);
+      state.data.rc = await api(`api/rc${qs(period)}`);
     } else if (state.tab === "auto") {
-      state.data.auto = await api(`api/autoorder${qs({ date: state.date })}`);
+      state.data.auto = await api(`api/autoorder${qs(period)}`);
     } else if (state.tab === "days") {
-      state.data.days = await api(`api/by-days${qs({ source_id: state.source.days, date: state.date })}`);
+      state.data.days = await api(`api/by-days${qs({ source_id: state.source.days, ...period })}`);
     } else {
-      state.data.trend = await api(`api/trend${qs({ source_id: state.source.trend, end: state.date, count: state.trendCount })}`);
+      const weeks = isRange() ? period : { end: state.date, count: state.trendCount };
+      state.data.trend = await api(`api/trend${qs({ source_id: state.source.trend, ...weeks })}`);
     }
     renderCurrent();
     if (state.detail) loadDetail();
@@ -880,7 +891,7 @@ function bind() {
   for (const b of $$(".tabs button")) b.addEventListener("click", () => showTab(b.dataset.tab));
   for (const b of $$("#mode-toggle button")) {
     b.addEventListener("click", () => {
-      if (state.mode === b.dataset.mode) return;
+      if (tabMode() === b.dataset.mode) return;
       state.mode = b.dataset.mode;
       if (state.mode === "day") state.date = lastDayInWeek(monday(state.date));
       savePrefs();
@@ -888,7 +899,7 @@ function bind() {
     });
   }
   $("#period-select").addEventListener("change", (e) => {
-    state.date = state.tab === "pivot" && state.mode === "day" ? e.target.value : lastDayInWeek(e.target.value);
+    state.date = tabMode() === "day" ? e.target.value : lastDayInWeek(e.target.value);
     load();
   });
   $("#range-form").addEventListener("submit", (e) => {

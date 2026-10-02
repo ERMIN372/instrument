@@ -187,6 +187,24 @@ def test_by_days_trend_item_and_export(client):
     assert ws["E7"].value == "=SUMIFS(E5:E5,$D$5:$D$5,$D7)"
 
 
+def test_trend_range(client):
+    """Динамика за период — недели, которые он задевает, целиком."""
+    upload(client, "Выпуск", xlsx([(d, BUN, i) for i, d in enumerate(days(W38, 14))]))
+    sid = client.get("/api/meta").json()["sources"][0]["id"]
+
+    t = client.get("/api/trend", params={"source_id": sid, "date": "2026-09-16", "date_to": "2026-09-22"}).json()
+    assert [w["start"] for w in t["weeks"]] == ["2026-09-14", "2026-09-21"]
+    assert t["rows"][0]["values"] == [21, 70] and t["rows"][0]["delta"] == pytest.approx(49 / 21)
+    assert t["period"]["label"] == "16.09.2026–22.09.2026 (7 дн.)"
+
+    # Период внутри одной недели — одна колонка, сравнивать не с чем.
+    t = client.get("/api/trend", params={"source_id": sid, "date": "2026-09-22", "date_to": "2026-09-23"}).json()
+    assert t["rows"][0]["values"] == [70] and t["rows"][0]["delta"] is None
+    assert client.get("/api/trend", params={"source_id": sid, "end": "2026-09-21"}).json()["period"] is None
+    assert client.get("/api/trend", params={"source_id": sid, "date": "2026-09-22",
+                                            "date_to": "2026-09-01"}).status_code == 400
+
+
 def test_errors(client):
     assert client.get("/api/pivot", params={"date": "nope"}).status_code == 400
     assert client.get("/api/by-days", params={"source_id": 42}).status_code == 404
@@ -382,6 +400,52 @@ def test_rc_tab_wed_to_mon(client):
         [23, 100, 100, 100, 100, 100, 5, 5, 5, 5, 5, 23 - 500 + 25, 4, 14, 14]
 
 
+def test_rc_range(client):
+    """РЦ за произвольный период: остаток на первый день − заказ + выпуск за период → остаток на день после."""
+    upload(client, "Остатки на начало периода", xlsx([(d, BUN, d.day) for d in days(W39, 8)]))
+    upload(client, "Заказ покупателей", xlsx([(d, BUN, 2) for d in days(dt.date(2026, 9, 5), 23)]))
+    upload(client, "Выпуск производства", xlsx([(d, BUN, 5) for d in days(W39, 7)]))
+
+    # Период Ср–Вс — ровно неделя.
+    week = client.get("/api/rc", params={"date": "2026-09-25"}).json()
+    rng = client.get("/api/rc", params={"date": "2026-09-23", "date_to": "2026-09-27"}).json()
+    assert (week["mode"], rng["mode"]) == ("week", "range")
+    assert rng["rows"] == week["rows"] and rng["columns"] == week["columns"]
+
+    # Короткий период — по дням: 21 − 2×4 + 5×4 = 33 на 25.09; потребление — 3 недели до 21.09.
+    t = client.get("/api/rc", params={"date": "2026-09-21", "date_to": "2026-09-24"}).json()
+    assert [(c["role"], c["sub"]) for c in t["columns"][:1] + t["columns"][9:10]] == [
+        ("stock", "Пн 21.09"), ("calc", "Пт 25.09")]
+    assert t["rows"][0]["values"] == [21, 2, 2, 2, 2, 5, 5, 5, 5, 33, 4, 14, 14]
+    assert t["period"]["label"] == "21.09.2026–24.09.2026 (4 дн.) → остаток на 25.09.2026"
+    assert t["note"] == ("Остаток 21.09 — из 1С, остаток 25.09 — расчёт: остаток 21.09 − заказ 21.09–24.09 + "
+                         "выпуск 21.09–24.09. Потребление — 3 недели до 21.09.")
+
+    # Длиннее 14 дн. — заказ и выпуск одной суммой: 50 − 2×15 + 5×7 = 55 на 28.09;
+    # потребление — 3 недели до недели конца периода, а не начала.
+    upload(client, "Остатки на начало периода", xlsx([(dt.date(2026, 9, 13), BUN, 50)]))
+    t = client.get("/api/rc", params={"date": "2026-09-13", "date_to": "2026-09-27"}).json()
+    assert [(c["role"], c["sub"], c["covered"], c["of"]) for c in t["columns"]] == [
+        ("stock", "Вс 13.09", 1, 1), ("order", "13.09–27.09", 15, 15), ("output", "13.09–27.09", 7, 15),
+        ("calc", "Пн 28.09", 1, 1), ("consumption", "31.08–06.09", 2, 7), ("consumption", "07.09–13.09", 7, 7),
+        ("consumption", "14.09–20.09", 7, 7)]
+    assert t["rows"][0]["values"] == [50, 30, 35, 55, 4, 14, 14]
+    assert "(дней больше 14 — одной суммой)" in t["note"]
+
+    r = client.get("/api/export-rc.xlsx", params={"date": "2026-09-13", "date_to": "2026-09-27"})
+    assert "instrument_rc_2026-09-13_2026-09-27.xlsx" in r.headers["content-disposition"]
+    ws = load_workbook(io.BytesIO(r.content)).active
+    assert ws["A2"].value.startswith("Остаток 13.09 — из 1С, остаток 28.09 — расчёт")
+    assert (ws["E4"].value, ws["F4"].value, ws["H4"].value) == ("Остаток Вс 13.09", "Заказ 13.09–27.09",
+                                                              "Остаток расчёт Пн 28.09")
+    assert [ws.cell(row=5, column=c).value for c in range(5, 9)] == [50, 30, 35, 55]
+
+    for params in ({"date": "2026-09-20", "date_to": "2026-09-16"}, {"date_to": "2026-09-16"},
+                   {"date": "2025-01-01", "date_to": "2026-09-16"}):
+        for url in ("/api/rc", "/api/export-rc.xlsx", "/api/autoorder", "/api/export-autoorder.xlsx"):
+            assert client.get(url, params=params).status_code == 400, (url, params)
+
+
 def test_order_columns_current_and_future(client):
     """Круассан со скрина, порядок колонок как просил заказчик: остаток на начало (14.09),
     заказ склада на текущий период (14.09 → 15 960), заказ покупателей, заказ склада на
@@ -549,6 +613,26 @@ def test_autoorder_formulas_and_backtest(client):
     # Как заказали на самом деле: 200 и 210 — покрытие выше двух недель оба раза.
     assert by_key["fact"]["hit"] == 1
     assert by_key["fact"]["cover"] == pytest.approx(((125 + 200) / 84 + (135 + 210) / 98) / 2)
+
+    # Период Ср–Вс — ровно неделя.
+    r = client.get("/api/autoorder", params={"date": "2026-09-23", "date_to": "2026-09-27"}).json()
+    assert r["mode"] == "range" and r["period"]["label"] == "23.09.2026–27.09.2026 (5 дн.) → заказ с 28.09.2026"
+    assert {k: v for k, v in r.items() if k not in ("mode", "period")} == \
+        {k: v for k, v in t.items() if k not in ("mode", "period")}
+    # Период 16–27.09: остаток 16.09 − заказы 16–27.09 + выпуск 16–27.09 = 120 − (5×12 + 7×14) + 12×15 = 142;
+    # расход — те же недели до недели конца периода.
+    r = client.get("/api/autoorder", params={"date": "2026-09-16", "date_to": "2026-09-27"}).json()
+    assert r["basis"].endswith("Остаток на пн — как во вкладке РЦ: остаток ср 16.09 − заказы 16.09–27.09 + "
+                               "выпуск 16.09–27.09.")
+    assert r["formula"] == t["formula"] and r["formulas"] == t["formulas"] and r["backtest"] == t["backtest"]
+    assert r["rows"][0]["offers"][0] == {"value": 3, "why": "расход 72,3 × 2 − остаток 142"}
+    assert r["rows"][0]["offers"][2]["value"] == 26  # 2 × 84 − 142
+    # Конец периода в четверг: заказ с пятницы, остатка на первый день нет — так и пишем.
+    r = client.get("/api/autoorder", params={"date": "2026-09-22", "date_to": "2026-09-24"}).json()
+    assert r["formula"] == "Заказ = расход в неделю × 2 − остаток на пт 25.09"
+    assert r["warnings"] == ["нет остатка на вт 22.09"]
+    x = client.get("/api/export-autoorder.xlsx", params={"date": "2026-09-16", "date_to": "2026-09-27"})
+    assert "instrument_autoorder_2026-09-16_2026-09-27.xlsx" in x.headers["content-disposition"]
 
     # Ключ первой версии (запас на конец недели) не подхватывается — покрытие остаётся 2.
     from app import db
