@@ -232,7 +232,8 @@ def test_rename_migration(client):
         "Выпуск производства", "Заказ покупателей", "Прочее"]
     assert meta["sources"][0]["close_label"] == "Остатки на конец периода"
     p = client.get("/api/pivot", params={"date": "2026-09-21"}).json()
-    assert [c["name"] for c in p["columns"]][-1] == "Остатки на конец периода"
+    assert [c["name"] for c in p["columns"]][-3:] == [  # за остатками на конец — расход
+        "Остатки на конец периода", "Расход нед. 37", "Расход нед. 38"]
 
     # Повторный запуск ничего не трогает: ручной порядок сохраняется.
     ids = [s["id"] for s in meta["sources"]]
@@ -432,52 +433,56 @@ def test_order_columns_current_and_future(client):
 
 
 def test_pivot_spent_last_two_weeks(client):
-    """Расход в конце сводной: заказ склада за две недели до выбранной — как во вкладке
-    «Динамика», где неделя = срез на пн следующей. Неделя 05–11.10 → нед. 39 (срез 28.09)
-    и нед. 40 (срез 05.10), Δ — к неделе раньше."""
+    """Расход в конце сводной: заказ покупателей за две недели до выбранной — как во вкладке
+    «Динамика», сумма за Пн–Вс. Неделя 05–11.10 → нед. 39 (21–27.09) и нед. 40 (28.09–04.10),
+    Δ — к неделе раньше. Заказ склада в расход не идёт."""
     D = dt.date
     upload(client, "Остатки на начало периода", xlsx([(D(2026, 10, 5), BUN, 100)]))
-    upload(client, "Заказ склада", xlsx([
-        (D(2026, 9, 14), BUN, 10), (D(2026, 9, 21), BUN, 17), (D(2026, 9, 21), LOAF, 3),
-        (D(2026, 9, 28), BUN, 24), (D(2026, 10, 5), BUN, 30)]))
+    upload(client, "Заказ склада", xlsx([(D(2026, 9, 21), BUN, 500), (D(2026, 9, 28), BUN, 600)]))
+    upload(client, "Заказ покупателей", xlsx([
+        (D(2026, 9, 15), BUN, 4), (D(2026, 9, 18), BUN, 6),                            # нед. 38: 10
+        (D(2026, 9, 21), BUN, 7), (D(2026, 9, 26), BUN, 10), (D(2026, 9, 22), LOAF, 3),  # нед. 39: 17
+        (D(2026, 9, 28), BUN, 20), (D(2026, 10, 4), BUN, 4),                           # нед. 40: 24
+        (D(2026, 10, 5), BUN, 30)]))                                                   # сам период
     srcs = {x["name"]: x["id"] for x in client.get("/api/meta").json()["sources"]}
-    sid = srcs["Заказ склада"]
-    client.patch(f"/api/sources/{sid}", json={"agg": "end"})
+    sid = srcs["Заказ покупателей"]
+    client.patch(f"/api/sources/{srcs['Заказ склада']}", json={"agg": "end"})
 
     p = client.get("/api/pivot", params={"mode": "week", "date": "2026-10-07"}).json()
     cols = p["columns"][-2:]
-    assert [(c["name"], c["kind"], c["date"], c["covered"], c["week"]["start"]) for c in cols] == [
-        ("Расход нед. 39", "spent", "2026-09-28", 1, "2026-09-21"),
-        ("Расход нед. 40", "spent", "2026-10-05", 1, "2026-09-28"),
+    assert [(c["id"], c["name"], c["kind"], c["date"], c["covered"], c["of"], c["week"]["start"]) for c in cols] == [
+        (sid, "Расход нед. 39", "spent", None, 7, 7, "2026-09-21"),
+        (sid, "Расход нед. 40", "spent", None, 7, 7, "2026-09-28"),
     ]
+    assert sum(c["kind"] == "spent" for c in p["columns"]) == 2
     assert p["columns"][-3]["name"] == "Остатки на конец периода"  # новые — после остатков на конец
     rows = {r["code"]: r["values"][-2:] for r in p["rows"]}
     assert rows["001"] == [
+        {"cur": 17, "prev": 10, "delta": (17 - 10) / 10},
         {"cur": 24, "prev": 17, "delta": (24 - 17) / 17},
-        {"cur": 30, "prev": 24, "delta": (30 - 24) / 24},
     ]
-    assert rows["002"] == [{"cur": None, "prev": 3, "delta": None}, {"cur": None, "prev": None, "delta": None}]
+    assert rows["002"] == [{"cur": 3, "prev": None, "delta": None}, {"cur": None, "prev": 3, "delta": None}]
 
     # Сверка с «Динамикой» по тем же неделям — цифры должны совпадать.
     t = client.get("/api/trend", params={"source_id": sid, "end": "2026-09-28", "count": 2}).json()
     assert [w["iso"] for w in t["weeks"]] == ["2026-W39", "2026-W40"]
-    assert {r["code"]: r["values"] for r in t["rows"]}["001"] == [v["cur"] for v in rows["001"]]
+    trend = {r["code"]: r["values"] for r in t["rows"]}
+    assert {code: [v["cur"] for v in vals] for code, vals in rows.items()} == {"001": trend["001"], "002": trend["002"]}
 
-    # День 30.09 — две недели до его недели (28.09): нед. 38 и 39, срезы 21.09 и 28.09.
+    # День 30.09 — две недели до его недели (28.09): нед. 38 (файл с 15.09 — 6 из 7 дн.) и 39.
     p = client.get("/api/pivot", params={"mode": "day", "date": "2026-09-30"}).json()
-    assert [(c["name"], c["date"], c["covered"]) for c in p["columns"][-2:]] == [
-        ("Расход нед. 38", "2026-09-21", 1), ("Расход нед. 39", "2026-09-28", 1)]
-    # Неделя 12.10 → нед. 41 со срезом на 12.10, а его нет — «нет данных».
+    assert [(c["name"], c["covered"], c["of"]) for c in p["columns"][-2:]] == [
+        ("Расход нед. 38", 6, 7), ("Расход нед. 39", 7, 7)]
+    # Неделя 12.10 → нед. 41: файл кончается 05.10 — 1 из 7 дн.
     p = client.get("/api/pivot", params={"mode": "week", "date": "2026-10-12"}).json()
-    assert [(c["date"], c["covered"]) for c in p["columns"][-2:]] == [("2026-10-05", 1), ("2026-10-12", 0)]
+    assert [(c["covered"], c["of"]) for c in p["columns"][-2:]] == [(7, 7), (1, 7)]
 
-    # Без заказа склада колонок расхода нет.
-    client.patch(f"/api/sources/{sid}", json={"agg": "sum"})
-    p = client.get("/api/pivot", params={"mode": "week", "date": "2026-10-07"}).json()
-    assert not any(c["kind"] == "spent" for c in p["columns"])
-
-    client.patch(f"/api/sources/{sid}", json={"agg": "end"})
     x = client.get("/api/export.xlsx", params={"mode": "week", "date": "2026-10-07"})
     ws = load_workbook(io.BytesIO(x.content))["Сводная"]
-    assert "Расход" in ws["A2"].value
+    assert "Расход — заказ покупателей" in ws["A2"].value
     assert [c.value for c in ws[4]][-3:] == ["Расход нед. 40", "Расход нед. 40 · пред.", "Расход нед. 40 · Δ"]
+
+    # Без заказа покупателей колонок расхода нет — заказ склада их не даёт.
+    client.patch(f"/api/sources/{sid}", json={"hidden": True})
+    p = client.get("/api/pivot", params={"mode": "week", "date": "2026-10-07"}).json()
+    assert not any(c["kind"] == "spent" for c in p["columns"])
