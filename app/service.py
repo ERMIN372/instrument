@@ -62,6 +62,11 @@ def day_info(d: dt.date) -> dict:
     return {"date": d.isoformat(), "label": f"{wd} {d:%d.%m.%Y}", "short": f"{wd} {d:%d.%m}"}
 
 
+def wd(d: dt.date) -> str:
+    """День недели строчными для подписей: «ср», «пн»."""
+    return WEEKDAYS[d.weekday()].lower()
+
+
 def delta(cur, prev):
     if cur is None or prev in (None, 0):
         return None
@@ -399,12 +404,16 @@ def by_days(conn, date: dt.date, source_id: int, date_to: dt.date | None = None)
     }
 
 
-def trend(conn, end: dt.date, count: int, source_id: int) -> dict | None:
-    """Один источник: товары × последние N недель."""
+def trend(conn, end: dt.date, count: int, source_id: int, start: dt.date | None = None) -> dict | None:
+    """Один источник: товары × последние N недель. Со start — недели, которые задевает период
+    start…end, целиком Пн–Вс (03–17.09 → недели 31.08, 07.09 и 14.09): обрезанная неделя
+    не сравнима с соседними."""
     src = _source(conn, source_id)
     if not src:
         return None
     last = monday(end)
+    if start is not None:
+        count = (last - monday(start)).days // 7 + 1
     starts = [last - (count - 1 - i) * WEEK for i in range(count)]
     all_days = [starts[0] + i * DAY for i in range(7 * count + 1)]  # +день: срез «на конец»
     data, _ = _load(conn, all_days, source_id)
@@ -414,8 +423,14 @@ def trend(conn, end: dt.date, count: int, source_id: int) -> dict | None:
     for code, item in items.items():
         cells = data[(source_id, code)]
         values = [aggregate(src["agg"], cells, week_days(s)) for s in starts]
-        rows.append({**_item_row(item), "values": values, "delta": delta(values[-1], values[-2])})
-    return {"weeks": [week_info(s) for s in starts], "source": src, "rows": _sort(rows)}
+        rows.append({**_item_row(item), "values": values,
+                     "delta": delta(values[-1], values[-2]) if count > 1 else None})
+    return {
+        "weeks": [week_info(s) for s in starts],
+        "period": range_info(start, end) if start is not None else None,
+        "source": src,
+        "rows": _sort(rows),
+    }
 
 
 def item_detail(conn, code: str, date: dt.date, weeks: int = 12) -> dict | None:
@@ -471,6 +486,7 @@ RC_ROLES = {
     "consumption": ("Потребление", re.compile(r"отгруз|реализац|продаж|заказ\w* покуп", re.I)),
 }
 RC_WEEKS = 3  # потребление — за столько недель до выбранной
+RC_DAILY_MAX = 14  # период длиннее — заказ и выпуск одной суммой, а не колонкой на каждый день
 
 
 def rc_settings(conn) -> dict[str, int | None]:
@@ -507,6 +523,16 @@ def rc_days(start: dt.date) -> tuple[dt.date, list[dt.date], dt.date]:
     return wed, [wed + i * DAY for i in range(5)], start + WEEK
 
 
+def rc_window(date: dt.date, date_to: dt.date | None = None) -> tuple[dt.date, list[dt.date], dt.date]:
+    """Срез остатка, дни движения и день расчётного остатка. Без date_to — неделя даты, как
+    договорились с РЦ (Ср, Ср–Вс, пн следующей); с date_to — произвольный период: срез на его
+    первый день, движение за все его дни, расчёт на день после последнего (01–10.09 → 01.09,
+    01–10.09, 11.09). Период Ср–Вс считается ровно как неделя."""
+    if date_to is None:
+        return rc_days(monday(date))
+    return date, date_range(date, date_to), date_to + DAY
+
+
 def calc_stock(start: float | None, orders: list, outputs: list) -> float | None:
     """Остаток ср − заказ + выпуск; нет заказа или выпуска за день — 0, нет остатка — не считаем."""
     if start is None:
@@ -514,7 +540,7 @@ def calc_stock(start: float | None, orders: list, outputs: list) -> float | None
     return start - sum(v for v in orders if v is not None) + sum(v for v in outputs if v is not None)
 
 
-def rc(conn, date: dt.date) -> dict:
+def rc(conn, date: dt.date, date_to: dt.date | None = None) -> dict:
     """Вкладка товародвиженца РЦ по неделе даты: остаток на среду, заказ и выпуск
     по дням Ср–Вс, остаток на понедельник следующей недели (неделя 21–27.09:
     остаток 23.09, заказ/выпуск 23–27.09, остаток 28.09), справа — потребление
@@ -522,19 +548,27 @@ def rc(conn, date: dt.date) -> dict:
     Остаток на среду — срез из файла; остаток на понедельник — расчёт по формуле,
     согласованной с РЦ: остаток ср − заказ Ср–Вс + выпуск Ср–Вс (остаток 1С на пн
     не берём: на будущие даты 1С повторяет последний остаток).
-    Потребление — свёртка недели по способу источника (обычно сумма)."""
-    start = monday(date)
-    wed, flow, close = rc_days(start)
+    С date_to — произвольный период (см. rc_window): тот же расчёт от его первого дня до дня
+    после последнего; длиннее RC_DAILY_MAX дн. — заказ и выпуск одной суммой за период.
+    Потребление — три недели до недели конца периода (самые свежие полные недели, как расход
+    в автозаказе), свёртка по способу источника (обычно сумма)."""
+    start = monday(date_to or date)
+    stock_day, flow, close = rc_window(date, date_to)
     past = [start - (RC_WEEKS - i) * WEEK for i in range(RC_WEEKS)]  # от старой к новой
     roles = rc_settings(conn)
     by_id = {s["id"]: s for s in sources(conn)}
 
-    # (роль, заголовок, день или None, дни недели для потребления)
-    cols = [("stock", "Остаток", wed, None)] + [("order", "Заказ", d, None) for d in flow] \
-        + [("output", "Выпуск", d, None) for d in flow] + [("calc", "Остаток расчёт", close, None)] \
+    def moves(role, label):  # заказ и выпуск: по дням или одной суммой за длинный период
+        if len(flow) <= RC_DAILY_MAX:
+            return [(role, label, d, None) for d in flow]
+        return [(role, label, None, flow)]
+
+    # (роль, заголовок, день или None, дни для суммы: потребление за неделю, движение за период)
+    cols = [("stock", "Остаток", stock_day, None)] + moves("order", "Заказ") + moves("output", "Выпуск") \
+        + [("calc", "Остаток расчёт", close, None)] \
         + [("consumption", f"Потребл. нед. {w.isocalendar()[1]}", None, week_days(w)) for w in past]
     # +start: срез «на конец» последней прошлой недели для источников agg = end
-    data, source_days = _load(conn, sorted({wed, *flow, close, start, *(d for w in past for d in week_days(w))}))
+    data, source_days = _load(conn, sorted({stock_day, *flow, close, start, *(d for w in past for d in week_days(w))}))
     used = {sid for sid in roles.values() if sid}
     items = _items(conn, {code for sid, code in data if sid in used})
     file_days = _covered_days(conn, flow)
@@ -544,12 +578,15 @@ def rc(conn, date: dt.date) -> dict:
         if not sid:
             return None
         cells = data.get((sid, code), {})
-        return cells.get(day) if day else aggregate(by_id[sid]["agg"], cells, days)
+        if day:
+            return cells.get(day)
+        # заказ и выпуск за период — сумма дней, как в расчёте по дням, при любом способе источника
+        return aggregate(by_id[sid]["agg"] if role == "consumption" else "sum", cells, days)
 
+    n = sum(role == "order" for role, *_ in cols)
     rows = []
     for code, item in items.items():
         values = [value(role, day, days, code) for role, _, day, days in cols]
-        n = len(flow)
         values[1 + 2 * n] = calc_stock(values[0], values[1:1 + n], values[1 + n:1 + 2 * n])
         if any(v is not None for v in values):
             rows.append({**_item_row(item), "values": values})
@@ -561,17 +598,29 @@ def rc(conn, date: dt.date) -> dict:
             sub, covered, of = day_info(day)["short"], columns[0]["covered"], 1
         elif day:
             # остаток — срез: нужен срез на этот день; заказ/выпуск — достаточно, что файл за день загружен
+            # (за длинный период — сколько дней покрыто файлами, как у потребления, ниже)
             seen = source_days if role == "stock" else file_days
             sub, covered, of = day_info(day)["short"], int(bool(sid and day in seen[sid])), 1
         else:
             sub = f"{days[0]:%d.%m}–{days[-1]:%d.%m}"
-            covered, of = (_coverage(conn, days).get(sid, 0) if sid else 0), 7
+            covered, of = (_coverage(conn, days).get(sid, 0) if sid else 0), len(days)
         columns.append({"key": f"c{i}", "role": role, "label": label, "sub": sub, "covered": covered, "of": of})
+
+    if date_to is None:
+        period = {**week_info(start), "label": f"Ср {stock_day:%d.%m} → Пн {close:%d.%m.%Y} · нед. {start.isocalendar()[1]}"}
+        note = "Остаток ср — из 1С, остаток пн — расчёт: остаток ср − заказ Ср–Вс + выпуск Ср–Вс."
+    else:
+        span = f"{flow[0]:%d.%m}–{flow[-1]:%d.%m}"
+        info = range_info(date, date_to)
+        period = {**info, "label": f"{info['label']} → остаток на {close:%d.%m.%Y}"}
+        note = (f"Остаток {stock_day:%d.%m} — из 1С, остаток {close:%d.%m} — расчёт: остаток {stock_day:%d.%m} − "
+                f"заказ {span} + выпуск {span}"
+                + (f" (дней больше {RC_DAILY_MAX} — одной суммой)." if len(flow) > RC_DAILY_MAX else "."))
+    note += f" Потребление — {RC_WEEKS} недели до {start:%d.%m}."
     return {
-        "period": {
-            **week_info(start),
-            "label": f"Ср {wed:%d.%m} → Пн {close:%d.%m.%Y} · нед. {start.isocalendar()[1]}",
-        },
+        "mode": "week" if date_to is None else "range",
+        "period": period,
+        "note": note,
         "roles": {role: {"id": sid, "name": by_id[sid]["name"]} if sid else None for role, sid in roles.items()},
         "columns": columns,
         "rows": _sort(rows),
@@ -653,12 +702,12 @@ def _num(x: float) -> str:
     return s.replace(",", "\u00a0").replace(".", ",")
 
 
-def auto_offers(hist: list, stock: float | None, cover_weeks: float, k: float, wed: dt.date) -> list[dict]:
+def auto_offers(hist: list, stock: float | None, cover_weeks: float, k: float, stock_day: dt.date) -> list[dict]:
     """Предложение по формулам А–Г и «почему так» — одной строкой с цифрами расчёта."""
     out = []
     for r, order, full in zip(auto_rates(hist, k), auto_orders(hist, stock, cover_weeks, k), (3, 3, 3, AUTO_WEEKS)):
         if stock is None:
-            why = f"нет остатка на ср {wed:%d.%m}"
+            why = f"нет остатка на {wd(stock_day)} {stock_day:%d.%m}"
         elif r is None:
             why = "нет расхода за прошлые недели"
         elif cover_weeks * r[0] + r[1] <= stock:
@@ -673,7 +722,7 @@ def auto_offers(hist: list, stock: float | None, cover_weeks: float, k: float, w
     return out
 
 
-def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
+def autoorder(conn, date: dt.date, today: dt.date | None = None, date_to: dt.date | None = None) -> dict:
     """Автозаказ (демо): сколько заказать складу на следующую неделю по четырём формулам —
     на экране только предложение и «почему так». Считаем в среду, как во вкладке РЦ, и её же
     источниками: неделя 21–27.09 → остаток на пн 28.09 = ост. 23.09 − заказ 23–27.09 + выпуск
@@ -683,18 +732,20 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
     потребления недели, на которую заказывали, и рядом — фактический «Заказ склада» (первый
     источник со способом end): покрытие = (остаток пн + заказ) / потребление, меньше 1 — к концу
     недели остаток в минусе. Берём только прошедшие недели — на будущие 1С отдаёт заказы
-    покупателей не целиком."""
+    покупателей не целиком.
+    С date_to — произвольный период, остаток считаем как во вкладке РЦ (rc_window): срез на первый
+    день − заказ + выпуск за период → остаток на день после последнего, заказ — с этого дня. Расход и
+    прогон — недели до недели конца периода: самые свежие полные недели перед заказом."""
     today = today or dt.date.today()
-    start = monday(date)
-    nxt = start + WEEK
-    wed = rc_days(start)[0]
+    start = monday(date_to or date)
+    stock_day, flow, close = rc_window(date, date_to)
     roles = rc_settings(conn)
     params = auto_settings(conn)
     srcs = sources(conn)
     by_id = {s["id"]: s for s in srcs}
     wh = next((s for s in srcs if s["agg"] == "end"), None)
     first = start - 2 * AUTO_WEEKS * WEEK  # история для самой старой недели прогона
-    days = date_range(first, start + 6 * DAY)
+    days = date_range(min(first, stock_day), start + 6 * DAY)  # длинный период начинается раньше истории
     data, source_days = _load(conn, days)
     cons_sid = roles["consumption"]
     cons_agg = by_id[cons_sid]["agg"] if cons_sid else "sum"
@@ -714,10 +765,9 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
     def hist(code, w):  # AUTO_WEEKS недель до недели w, от старой к свежей
         return [cons(code, w - (AUTO_WEEKS - i) * WEEK) for i in range(AUTO_WEEKS)]
 
-    def stock(code, w):  # расчётный остаток на пн после недели w — как во вкладке РЦ
-        wed, flow, _ = rc_days(w)
+    def stock(code, day, flow):  # расчётный остаток после движения flow от среза на day — как во вкладке РЦ
         orders, outputs = cells(roles["order"], code), cells(roles["output"], code)
-        return calc_stock(cells(roles["stock"], code).get(wed),
+        return calc_stock(cells(roles["stock"], code).get(day),
                           [orders.get(d) for d in flow], [outputs.get(d) for d in flow])
 
     def fact(code, w):  # заказ склада на неделю после w — срез на её пн; товара нет в срезе — 0
@@ -731,9 +781,9 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
 
     rows = []
     for code, item in items.items():
-        h, o = hist(code, start), stock(code, start)
+        h, o = hist(code, start), stock(code, stock_day, flow)
         if any(h) or o:  # ни расхода, ни остатка — нечего предлагать
-            rows.append({**_item_row(item), "offers": auto_offers(h, o, cw, k, wed)})
+            rows.append({**_item_row(item), "offers": auto_offers(h, o, cw, k, stock_day)})
 
     # Прогон: недели до выбранной, у которых следующая (на неё и заказывали) уже прошла и загружена.
     tested = [w for w in (start - (AUTO_WEEKS - i) * WEEK for i in range(AUTO_WEEKS))
@@ -742,7 +792,7 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
     covers = defaultdict(list)  # формула -> (остаток пн + заказ) в неделях потребления той недели
     for code in items:
         for w in tested:
-            actual, o = cons(code, w + WEEK), stock(code, w)
+            actual, o = cons(code, w + WEEK), stock(code, *rc_days(w)[:2])
             if actual is None or actual <= 0 or o is None:
                 continue
             for key, order in zip(keys, auto_orders(hist(code, w), o, cw, k) + [fact(code, w)]):
@@ -761,8 +811,8 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
         warnings.append("не выбран источник потребления — во вкладке РЦ")
     elif (n := sum(start - i * WEEK in full for i in (1, 2, 3))) < 3:
         warnings.append(f"расход целиком загружен только за {n} из 3 прошлых нед.")
-    if not roles["stock"] or wed not in source_days[roles["stock"]]:
-        warnings.append(f"нет остатка на ср {wed:%d.%m}")
+    if not roles["stock"] or stock_day not in source_days[roles["stock"]]:
+        warnings.append(f"нет остатка на {wd(stock_day)} {stock_day:%d.%m}")
 
     # Как считаем — над таблицей и в xlsx, с номерами недель выбранного периода.
     wk = [(start - (AUTO_WEEKS - i) * WEEK).isocalendar()[1] for i in range(AUTO_WEEKS)]
@@ -773,23 +823,26 @@ def autoorder(conn, date: dt.date, today: dt.date | None = None) -> dict:
              f"расход = самая большая из {a}, {b}, {c}",
              f"расход = среднее за {AUTO_WEEKS} нед. (нед. {wk[0]}–{wk[-1]}), к заказу ещё + {sigma} — "
              "насколько недели отличаются друг от друга, страховка от скачков"]
-    sun = wed + 4 * DAY
+    span = f"{flow[0]:%d.%m}–{flow[-1]:%d.%m}"
     cons_name = by_id[cons_sid]["name"] if cons_sid else "не выбран"
+    if date_to is None:
+        period = {**week_info(start), "label": f"Ср {stock_day:%d.%m} → заказ на нед. {close.isocalendar()[1]} · "
+                                               f"{close:%d.%m}–{close + 6 * DAY:%d.%m.%Y}"}
+    else:
+        info = range_info(date, date_to)
+        period = {**info, "label": f"{info['label']} → заказ с {close:%d.%m.%Y}"}
 
     return {
-        "period": {
-            **week_info(start),
-            "label": f"Ср {wed:%d.%m} → заказ на нед. {nxt.isocalendar()[1]} · {nxt:%d.%m}–{nxt + 6 * DAY:%d.%m.%Y}",
-        },
+        "mode": "week" if date_to is None else "range",
+        "period": period,
         "roles": {role: {"id": sid, "name": by_id[sid]["name"]} if sid else None for role, sid in roles.items()},
         "warehouse": {"id": wh["id"], "name": wh["name"]} if wh else None,
         "params": params,
-        "formula": f"Заказ = расход в неделю × {_num(cw)} − остаток на пн {nxt:%d.%m}",
+        "formula": f"Заказ = расход в неделю × {_num(cw)} − остаток на {wd(close)} {close:%d.%m}",
         "formula_note": (f"чтобы остаток + заказ = {_num(cw)} нед. расхода. Меньше нуля — 0; от 1 000 округляем "
                          "до сотен, от 100 — до десятков."),
-        "basis": (f"Расход — «{cons_name}» за неделю пн–вс, неполные недели не считаем. Остаток на пн — как во "
-                  f"вкладке РЦ: остаток ср {wed:%d.%m} − заказы {wed:%d.%m}–{sun:%d.%m} + выпуск "
-                  f"{wed:%d.%m}–{sun:%d.%m}."),
+        "basis": (f"Расход — «{cons_name}» за неделю пн–вс, неполные недели не считаем. Остаток на {wd(close)} — "
+                  f"как во вкладке РЦ: остаток {wd(stock_day)} {stock_day:%d.%m} − заказы {span} + выпуск {span}."),
         "formulas": [{"key": key, "label": label, "rule": rule} for (key, label), rule in zip(AUTO_FORMULAS, rules)],
         "warnings": warnings,
         "rows": _sort(rows),
