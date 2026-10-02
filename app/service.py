@@ -223,6 +223,14 @@ def _coverage(conn, days: list[dt.date]) -> dict[int, int]:
 
 
 CURRENT, FUTURE = "на текущий период", "на будущий период"
+SPEND_WEEKS = 2  # фактический расход — заказ склада за столько недель до периода
+
+
+def spend_weeks(start: dt.date) -> list[dt.date]:
+    """Понедельники недель фактического расхода: SPEND_WEEKS недель перед неделей, в которую
+    попадает начало периода, от старой к новой. Неделя 05–11.10 → 21.09 и 28.09."""
+    base = monday(start)
+    return [base - (SPEND_WEEKS - i) * WEEK for i in range(SPEND_WEEKS)]
 
 
 def future_after_next(groups: list[tuple[list, list]]) -> list:
@@ -266,7 +274,11 @@ def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dic
 
     Источник-остаток даёт две колонки: «на начало» — срез на первый день периода
     (на своём месте) и «на конец» — срез на первый день следующего периода (в конце
-    таблицы). Неделя 21–27.09: начало — 21.09, конец — 28.09."""
+    таблицы). Неделя 21–27.09: начало — 21.09, конец — 28.09.
+
+    Заказ склада (end) даёт ещё три колонки в самом конце — фактический расход: заказ склада
+    по каждой из двух недель перед периодом (срез на их понедельники) и средний за эти недели.
+    Неделя 05–11.10 → 21.09, 28.09 и среднее. Δ у них — к неделе раньше в любом режиме."""
     if mode == "week":
         start = monday(date)
         days = week_days(start)
@@ -282,7 +294,9 @@ def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dic
     after = days[-1] + DAY
 
     srcs = [s for s in sources(conn) if not s["hidden"]]
-    data, source_days = _load(conn, sorted({*days, *prev_days, after, after - shift}))
+    spend = spend_weeks(days[0])
+    spend_prev = [w - WEEK for w in spend]
+    data, source_days = _load(conn, sorted({*days, *prev_days, after, after - shift, *spend, *spend_prev}))
     items = _items(conn, {code for _, code in data})
     coverage = _coverage(conn, days)
 
@@ -301,15 +315,33 @@ def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dic
         (s, f"{s['id']}c", s["close_label"], "close", [after], [after - shift])
         for s in srcs if s["agg"] == "last"
     ]
+    # Фактический расход — в самом конце: заказ склада по неделе (срез на её пн) и средний.
+    for s in srcs:
+        if s["agg"] == "end":
+            cols += [(s, f"{s['id']}w{i}", f"Факт. расход нед. {w.isocalendar()[1]}", "spend", [w], [w - WEEK])
+                     for i, w in enumerate(spend)]
+            cols.append((s, f"{s['id']}a", f"Средний расход за {SPEND_WEEKS} нед.", "spend_avg", spend, spend_prev))
+
+    def spend_mean(sid: int, cells: dict, weeks: list[dt.date]) -> float | None:
+        """Среднее по неделям, где есть срез заказа склада. Срез есть, а товара в нём нет —
+        заказа не было, это 0; среза нет — неделя не в счёт. Товара нет ни в одном срезе — пусто."""
+        if not any(w in cells for w in weeks):
+            return None
+        vals = [cells.get(w, 0) for w in weeks if w in source_days[sid]]
+        return sum(vals) / len(vals)
 
     rows = []
     for code, item in items.items():
         values, has_any = [], False
         for s, _key, _name, kind, cur_days, old_days in cols:
             cells = data.get((s["id"], code), {})
-            agg = "last" if kind == "current" else s["agg"]  # текущий заказ — срез на первый день
-            cur = aggregate(agg, cells, cur_days)
-            prev = aggregate(agg, cells, old_days)
+            if kind == "spend_avg":
+                cur, prev = spend_mean(s["id"], cells, cur_days), spend_mean(s["id"], cells, old_days)
+            else:
+                # текущий заказ и расход за неделю — срез на первый день
+                agg = "last" if kind in ("current", "spend") else s["agg"]
+                cur = aggregate(agg, cells, cur_days)
+                prev = aggregate(agg, cells, old_days)
             has_any |= cur is not None or prev is not None
             values.append({"cur": cur, "prev": prev, "delta": delta(cur, prev)})
         if has_any:
@@ -320,6 +352,14 @@ def pivot(conn, mode: str, date: dt.date, date_to: dt.date | None = None) -> dic
         col = {"id": s["id"], "key": key, "name": name, "agg": s["agg"], "kind": kind}
         if kind == "sum":
             col.update(covered=coverage.get(s["id"], 0), of=len(days), date=None)
+        elif kind == "spend_avg":  # сколько недель со срезом заказа склада
+            weeks = [w.isocalendar()[1] for w in cur_days]
+            col.update(covered=sum(w in source_days[s["id"]] for w in cur_days), of=len(cur_days), date=None,
+                       weeks=True, sub=f"нед. {weeks[0]}–{weeks[-1]}")
+        elif kind == "spend":
+            w = cur_days[0]
+            col.update(covered=int(w in source_days[s["id"]]), of=1, date=w.isoformat(),
+                       sub=f"{w:%d.%m}–{w + 6 * DAY:%d.%m}")
         else:  # срез: есть ли у источника данные на нужный день
             day = after if kind == "end" else cur_days[0]
             col.update(covered=int(day in source_days[s["id"]]), of=1, date=day.isoformat())

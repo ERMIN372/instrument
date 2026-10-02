@@ -331,7 +331,8 @@ function renderPivot() {
   renderCategories(data.rows);
   // Колонки: «сумма» за дни периода или срез на дату (остаток на начало / на конец, значение на конец периода).
   const partial = data.columns.filter((c) => c.covered < c.of);
-  const gap = (c) => (c.date ? `${c.name} — нет среза на ${ddmm(c.date)}` : `${c.name} — ${c.covered} из ${c.of} дн.`);
+  const gap = (c) => (c.date ? `${c.name} — нет среза на ${ddmm(c.date)}`
+    : `${c.name} — ${c.covered} из ${c.of} ${c.weeks ? "нед." : "дн."}`);
   setCaption(
     `${data.period.label}. Значения в базовых единицах (шт, кг). Остатки — срез на начало периода и на начало следующего. Δ — ${data.period.compare}. `,
     partial.length ? el("span", { class: "warn" }, `⚠ Неполные данные: ${partial.map(gap).join("; ")}`) : null,
@@ -339,9 +340,12 @@ function renderPivot() {
   const columns = [nameCol, unitCol, ...data.columns.map((s, i) => ({
     key: `s${s.key}`,
     label: s.name,
-    sub: s.date
-      ? `на ${ddmm(s.date)}${s.covered ? "" : " · нет данных"}`
-      : AGG[s.agg] + (s.covered < s.of ? ` · ${s.covered}/${s.of} дн.` : ""),
+    // Фактический расход: своя подпись с сервера — даты недели или номера недель среднего.
+    sub: s.sub
+      ? s.sub + (s.covered >= s.of ? "" : s.of > 1 ? ` · ${s.covered}/${s.of} нед.` : " · нет данных")
+      : s.date
+        ? `на ${ddmm(s.date)}${s.covered ? "" : " · нет данных"}`
+        : AGG[s.agg] + (s.covered < s.of ? ` · ${s.covered}/${s.of} дн.` : ""),
     subWarn: s.covered < s.of,
     num: true,
     sep: true,

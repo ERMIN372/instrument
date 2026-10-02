@@ -79,12 +79,14 @@ def _pivot_sheet(ws, table: dict, rows: list[dict]):
     ws["A1"] = f"Сводная · {period['label']} · в базовых единицах"
     ws["A1"].font = Font(name=FONT, bold=True, size=13)
     ws["A2"] = (f"Δ — {period['compare']}. Остаток на начало — срез на первый день периода,"
-                " на конец — на первый день следующего.")
+                " на конец — на первый день следующего. Факт. расход — заказ склада за неделю"
+                " (срез на её понедельник), Δ — к неделе раньше.")
     ws["A2"].font = Font(name=FONT, italic=True, color="6B7280", size=9)
 
     labels = list(FIXED)
     for s in table["columns"]:
-        labels += [s["name"], f"{s['name']} · пред.", f"{s['name']} · Δ"]
+        name = f"{s['name']} ({s['sub']})" if s.get("sub") else s["name"]
+        labels += [name, f"{name} · пред.", f"{name} · Δ"]
     _header(ws, 4, labels)
 
     first = r = 5
