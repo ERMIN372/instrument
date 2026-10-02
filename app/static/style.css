@@ -156,6 +156,14 @@ table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-var
 .grid tr.item:hover td, .grid tr.item.active td { background: var(--accent-wash); }
 .grid td.nil { color: var(--text-muted); }
 .grid td.strong { font-weight: 700; }
+.rules {
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 12px; font-size: 13px; line-height: 1.5;
+}
+.rules:empty { display: none; }
+.rules p { margin: 0; }
+.rules ul { margin: 6px 0; padding-left: 18px; }
+.rules .muted { font-size: 12px; }
 .grid thead th.why { text-align: left; }
 .grid td.why { color: var(--text-secondary); font-size: 12px; white-space: normal; min-width: 150px; max-width: 220px; }
 .grid td.sep, .grid th.sep { border-left: 1px solid var(--grid); }

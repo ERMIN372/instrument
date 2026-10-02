@@ -412,8 +412,14 @@ function renderAuto() {
   renderCategories(data.rows);
   setCaption(
     el("b", {}, "Демо-версия — пока тестируем. "),
-    `${data.period.label}. Заказ = ${nf.format(data.params.cover_weeks)} × расход в неделю − остаток на пн, округление до сотен. `,
+    `${data.period.label}. `,
     data.warnings.length ? el("span", { class: "warn" }, `⚠ ${data.warnings.join("; ")}`) : null,
+  );
+  // Как считаем — сверху, с номерами недель выбранного периода.
+  $("#auto-rules").replaceChildren(
+    el("p", {}, el("b", {}, data.formula), ` — ${data.formula_note}`),
+    el("ul", {}, ...data.formulas.map((f) => el("li", {}, el("b", {}, f.label), ` — ${f.rule}`))),
+    el("p", { class: "muted" }, data.basis),
   );
   // Только номенклатура и пары «заказ — почему»: остатки и расход есть на других вкладках.
   const name = { ...nameCol, render: (r) => [r.name, el("span", { class: "code" }, `${r.code} · ${r.unit}`)] };
@@ -496,7 +502,7 @@ async function load() {
   if (!TABLE_TABS.includes(state.tab)) return;
   if (!state.meta.days.length) {
     $("#caption").textContent = "Данных пока нет — загрузи xlsx на вкладке «Загрузка».";
-    for (const t of ["#pivot-table", "#rc-table", "#auto-table", "#days-table", "#trend-table"]) $(t).replaceChildren();
+    for (const t of ["#pivot-table", "#rc-table", "#auto-table", "#auto-rules", "#days-table", "#trend-table"]) $(t).replaceChildren();
     return;
   }
   try {
