@@ -119,6 +119,29 @@ def test_pivot_week_day_and_replace(client):
     assert "002" not in rows  # хлеба больше нет ни в W39, ни в W38 — строка не нужна
 
 
+def test_rolling_window_keeps_days_outside_file(client):
+    # Выгрузки идут окном −14…+14 дн. от сегодня. Первый файл — 07.09–05.10: булка 10, хлеб 5 в день.
+    upload(client, "Заказ покупателей", xlsx([(d, item, q) for d in days(dt.date(2026, 9, 7), 29)
+                                               for item, q in ((BUN, 10), (LOAF, 5))]))
+    # Следующий — 21.09–19.10: булка 20, хлеб отменили, 28.09 в файле нет совсем.
+    gap = dt.date(2026, 9, 28)
+    res = upload(client, "Заказ покупателей", xlsx([(d, BUN, 20) for d in days(W39, 29) if d != gap]))
+    assert res["replaced"] == 14 * 2  # 21.09–05.10 без 28.09, оба товара
+
+    sid = client.get("/api/meta").json()["sources"][0]["id"]
+    b = client.get("/api/by-days", params={"source_id": sid, "date": "2026-09-07", "date_to": "2026-10-19"}).json()
+    rows = {r["code"]: r["days"] for r in b["rows"]}
+    span = days(dt.date(2026, 9, 7), 43)
+    expect_bun = [10 if d < W39 or d == gap else 20 for d in span]
+    expect_loaf = [5 if d < W39 or d == gap else None for d in span]
+    assert rows["001"] == expect_bun   # до окна и пропущенный день — старые, остальное обновлено
+    assert rows["002"] == expect_loaf  # день из файла заменён целиком: отменённого хлеба там нет
+    assert b["covered"] == 43
+
+    # Старая загрузка остаётся в истории, пока за ней числятся дни.
+    assert len(client.get("/api/uploads").json()) == 2
+
+
 def test_pivot_range(client):
     # Выпуск 10/день 14–27.09, остатки — срез на каждый день 14–28.09 (100, 101, …).
     upload(client, "Выпуск", xlsx([(d, BUN, 10) for d in days(W38, 14)]))
@@ -384,6 +407,10 @@ def test_rc_tab_wed_to_mon(client):
     assert not t["columns"][0]["covered"] and not t["columns"][11]["covered"]
 
     # Выпуск только 21 и 27.09: в загруженном периоде дни без строк — это ноль, а не «нет данных».
+    # Новый файл дни без строк не трогает, поэтому прежнюю загрузку выпуска сначала удаляем.
+    for u in client.get("/api/uploads").json():
+        if u["source"] == "Выпуск производства":
+            assert client.delete(f"/api/uploads/{u['id']}").status_code == 200
     upload(client, "Выпуск производства", xlsx([(W39, BUN, 5), (dt.date(2026, 9, 27), BUN, 5)]))
     t = client.get("/api/rc", params={"date": "2026-09-25"}).json()
     out = [c for c in t["columns"] if c["role"] == "output"]
