@@ -114,10 +114,13 @@ def ingest(conn, filename: str, source_name: str, parsed: ParsedFile, via: str =
             (src["id"], filename, days[0], days[-1], parsed.rows, via),
         ).fetchone()["id"]
 
-        # Новый файл того же источника заменяет его данные за свой период.
+        # Новый файл того же источника заменяет его данные только за дни, которые в нём есть:
+        # выгрузки идут скользящим окном (−14…+14 дн. от сегодня), поэтому дни вне файла и дни
+        # без строк в нём остаются как были. День из файла заменяется целиком — товара, которого
+        # в нём больше нет (заказ отменили, остаток обнулился), за этот день не останется.
         replaced = conn.execute(
-            "DELETE FROM movements WHERE source_id = %s AND day BETWEEN %s AND %s",
-            (src["id"], days[0], days[-1]),
+            "DELETE FROM movements WHERE source_id = %s AND day = ANY(%s)",
+            (src["id"], days),
         ).rowcount
 
         with conn.cursor().copy(
