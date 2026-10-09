@@ -1,0 +1,54 @@
+name: RelaxDev Docker checks
+
+on:
+  push:
+    branches: [relax-migration]
+  workflow_dispatch:
+
+jobs:
+  test-and-smoke:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: instrument_test
+          POSTGRES_USER: instrument
+          POSTGRES_PASSWORD: testpassword
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instrument -d instrument_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgresql://instrument:testpassword@127.0.0.1:5432/instrument_test
+      DATABASE_URL: postgresql://instrument:testpassword@127.0.0.1:5432/instrument_test
+      APP_USER: admin
+      APP_PASSWORD: testpassword
+      MAIL_IMPORT_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt pytest httpx
+      - run: pytest -q
+      - name: Docker build
+        run: docker build -t instrument-relax:test .
+      - name: Docker smoke against PostgreSQL
+        run: |
+          docker run -d --name instrument-relax --network host \
+            -e DATABASE_URL="$DATABASE_URL" -e APP_USER="$APP_USER" \
+            -e APP_PASSWORD="$APP_PASSWORD" -e PORT=8080 \
+            instrument-relax:test
+          for i in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:8080/healthz; then break; fi
+            sleep 2
+          done
+          curl --fail http://127.0.0.1:8080/healthz
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/meta)" = 401
+          test "$(curl -s -u admin:testpassword -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/meta)" = 200
+      - if: failure()
+        run: docker logs instrument-relax || true

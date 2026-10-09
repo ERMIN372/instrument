@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from . import db, export, mail_import, service
+from .deploy_config import validate_deployment
 from .parser import parse_xlsx, source_from_filename
 
 STATIC = Path(__file__).parent / "static"
@@ -24,6 +25,7 @@ MAX_RANGE_DAYS = 366
 
 @asynccontextmanager
 async def lifespan(_app):
+    validate_deployment()
     db.init()
     mail_stop = mail_import.start()
     yield

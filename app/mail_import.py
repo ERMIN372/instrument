@@ -165,6 +165,9 @@ def _loop(cfg: dict, stop: threading.Event) -> None:
 
 def start() -> threading.Event | None:
     """Фоновая проверка ящика; вернёт событие для остановки или None, если почта не настроена."""
+    if os.environ.get('RELAXDEV_DEPLOY') == '1' and os.environ.get('MAIL_IMPORT_ENABLED') != '1':
+        status.update(enabled=False, error=None)
+        return None
     try:
         cfg = config()
     except ValueError as e:
